@@ -19,7 +19,7 @@ func newTestServer(t *testing.T) (*httptest.Server, Config) {
 	cfg := helperConfig(t)
 	sv := newSupervisor(cfg)
 	t.Cleanup(sv.closeAll)
-	ts := httptest.NewServer(newServer(cfg, sv))
+	ts := httptest.NewServer(newServer(cfg, sv, newUpdater(cfg, testWriter{t})))
 	t.Cleanup(ts.Close)
 	return ts, cfg
 }
@@ -52,11 +52,11 @@ func TestVersionEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	var v struct {
-		Service  string `json:"service"`
-		Protocol int    `json:"protocol"`
+		Service string `json:"service"`
+		Version string `json:"version"`
 	}
 	decodeBody(t, resp, &v)
-	if v.Service != "pi-web" || v.Protocol != Protocol {
+	if v.Service != "pi-web" || v.Version == "" {
 		t.Fatalf("unexpected version payload: %+v", v)
 	}
 }
@@ -244,6 +244,130 @@ func TestFileEndpoint(t *testing.T) {
 	if missing.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing file: status %d", missing.StatusCode)
 	}
+}
+
+func TestModelsEndpoint(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/api/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Models []modelInfo `json:"models"`
+	}
+	decodeBody(t, resp, &out)
+	if len(out.Models) != 2 {
+		t.Fatalf("expected 2 models, got %d: %+v", len(out.Models), out.Models)
+	}
+	if out.Models[0].Model != "stub-model" || out.Models[0].Thinking {
+		t.Errorf("unexpected first model: %+v", out.Models[0])
+	}
+	if out.Models[1].Model != "stub-think" || !out.Models[1].Thinking {
+		t.Errorf("unexpected second model: %+v", out.Models[1])
+	}
+}
+
+func TestSetModelAndThinking(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp := postJSON(t, ts.URL+"/api/sessions", map[string]any{})
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeBody(t, resp, &created)
+
+	modelResp := postJSON(t, ts.URL+"/api/sessions/"+created.ID+"/model", map[string]any{"provider": "stubco", "modelId": "stub-think"})
+	if modelResp.StatusCode != http.StatusOK {
+		t.Fatalf("set model: status %d", modelResp.StatusCode)
+	}
+	var mOut struct {
+		Model struct {
+			ID string `json:"id"`
+		} `json:"model"`
+	}
+	decodeBody(t, modelResp, &mOut)
+	if mOut.Model.ID != "stub-think" {
+		t.Fatalf("model not echoed: %+v", mOut.Model)
+	}
+
+	thinkResp := postJSON(t, ts.URL+"/api/sessions/"+created.ID+"/thinking", map[string]any{"level": "high"})
+	if thinkResp.StatusCode != http.StatusOK {
+		t.Fatalf("set thinking: status %d", thinkResp.StatusCode)
+	}
+	thinkResp.Body.Close()
+
+	bad := postJSON(t, ts.URL+"/api/sessions/"+created.ID+"/thinking", map[string]any{"level": "bogus"})
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid thinking level: status %d, want 400", bad.StatusCode)
+	}
+	bad.Body.Close()
+}
+
+func TestDirsEndpoint(t *testing.T) {
+	ts, cfg := newTestServer(t)
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "afile.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(ts.URL + "/api/dirs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Path string   `json:"path"`
+		Dirs []string `json:"dirs"`
+	}
+	decodeBody(t, resp, &out)
+	if out.Path != cfg.Workspace {
+		t.Errorf("path = %q, want workspace %q", out.Path, cfg.Workspace)
+	}
+	if len(out.Dirs) != 1 || out.Dirs[0] != "alpha" {
+		t.Errorf("dirs = %v, want [alpha] (files excluded)", out.Dirs)
+	}
+}
+
+func TestUpdateStatusAndAuto(t *testing.T) {
+	ts, cfg := newTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/update")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Current    string `json:"current"`
+		AutoUpdate bool   `json:"autoUpdate"`
+		CanUpdate  bool   `json:"canUpdate"`
+	}
+	decodeBody(t, resp, &status)
+	if status.Current != "test" || status.CanUpdate {
+		t.Fatalf("dev build should not be updatable: %+v", status)
+	}
+	if status.AutoUpdate {
+		t.Fatal("auto-update should default off")
+	}
+
+	autoResp := postJSON(t, ts.URL+"/api/update/auto", map[string]any{"enabled": true})
+	if autoResp.StatusCode != http.StatusOK {
+		t.Fatalf("set auto: status %d", autoResp.StatusCode)
+	}
+	var after struct {
+		AutoUpdate bool `json:"autoUpdate"`
+	}
+	decodeBody(t, autoResp, &after)
+	if !after.AutoUpdate {
+		t.Fatal("auto-update not reflected after enabling")
+	}
+	if s, ok := loadSettings(cfg.SettingsPath); !ok || !s.AutoUpdate {
+		t.Fatalf("auto-update preference not persisted: %+v ok=%v", s, ok)
+	}
+
+	// Dev builds must refuse to apply.
+	applyResp := postJSON(t, ts.URL+"/api/update/apply", map[string]any{})
+	if applyResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("apply on dev build: status %d, want 400", applyResp.StatusCode)
+	}
+	applyResp.Body.Close()
 }
 
 type sseEvent struct {

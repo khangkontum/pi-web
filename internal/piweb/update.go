@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -42,36 +44,66 @@ type releaseInfo struct {
 	Version      string            `json:"version"`
 	Commit       string            `json:"commit"`
 	PublishedAt  time.Time         `json:"published_at"`
-	Protocol     int               `json:"protocol"`
 	ChecksumsURL string            `json:"checksums_url"`
 	DownloadURLs map[string]string `json:"download_urls"`
 }
 
-// updater periodically replaces the running binary with the latest release.
-// All collaborators are injectable so tests never touch the network, the
-// real executable, or sudo.
+// updater checks for new releases and, when asked, replaces the running
+// binary. Auto-apply is opt-in (see auto); the background loop always
+// refreshes status so the UI can offer a manual update. All collaborators
+// are injectable so tests never touch the network, the real executable, or
+// sudo.
 type updater struct {
-	url      string
-	interval time.Duration
-	version  string
-	client   *http.Client
-	logw     io.Writer
-	exePath  func() (string, error)
-	apply    func(exePath string, data []byte) error
-	restart  func()
+	url          string
+	interval     time.Duration
+	version      string
+	settingsPath string
+	client       *http.Client
+	logw         io.Writer
+	exePath      func() (string, error)
+	apply        func(exePath string, data []byte) error
+	restart      func()
+
+	auto atomic.Bool
+
+	mu   sync.Mutex
+	last updateStatus
+}
+
+// updateStatus is the cached result of the most recent check, surfaced to the
+// UI. CheckedAt is the zero time until the first check completes.
+type updateStatus struct {
+	Latest    string    `json:"latest"`
+	Available bool      `json:"available"`
+	CheckedAt time.Time `json:"checkedAt"`
+	Error     string    `json:"error"`
 }
 
 func newUpdater(cfg Config, logw io.Writer) *updater {
-	return &updater{
-		url:      cfg.UpdateURL,
-		interval: cfg.UpdateInterval,
-		version:  cfg.Version,
-		client:   &http.Client{Timeout: 2 * time.Minute},
-		logw:     logw,
-		exePath:  os.Executable,
-		apply:    applyBinary,
-		restart:  restartSelf,
+	u := &updater{
+		url:          cfg.UpdateURL,
+		interval:     cfg.UpdateInterval,
+		version:      cfg.Version,
+		settingsPath: cfg.SettingsPath,
+		client:       &http.Client{Timeout: 2 * time.Minute},
+		logw:         logw,
+		exePath:      os.Executable,
+		apply:        applyBinary,
+		restart:      restartSelf,
 	}
+	auto := cfg.AutoUpdate
+	if s, ok := loadSettings(cfg.SettingsPath); ok {
+		auto = s.AutoUpdate
+	}
+	u.auto.Store(auto)
+	return u
+}
+
+// canUpdate reports whether this build can self-update at all. Dev builds
+// (unparsable version) never do.
+func (u *updater) canUpdate() bool {
+	_, ok := parseVersion(u.version)
+	return ok
 }
 
 func (u *updater) run(ctx context.Context) {
@@ -83,39 +115,107 @@ func (u *updater) run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		if err := u.checkAndApply(ctx); err != nil {
+		st, err := u.check(ctx)
+		if err != nil {
 			fmt.Fprintf(u.logw, "pi-web: update check: %v\n", err)
+		} else if st.Available && u.auto.Load() {
+			if v, err := u.installLatest(ctx); err != nil {
+				fmt.Fprintf(u.logw, "pi-web: auto-update: %v\n", err)
+			} else if v != "" {
+				fmt.Fprintf(u.logw, "pi-web: auto-updated %s -> %s, restarting\n", u.version, v)
+				u.restart()
+			}
 		}
 		timer.Reset(u.interval)
 	}
 }
 
-// checkAndApply fetches release metadata and, when a newer release exists,
-// downloads it, verifies its checksum in memory, renames it over the running
-// executable, and restarts. Any failure leaves the installed binary
-// untouched.
-func (u *updater) checkAndApply(ctx context.Context) error {
+// check fetches release metadata, compares versions, and caches the result.
+// It has no side effects on disk.
+func (u *updater) check(ctx context.Context) (updateStatus, error) {
+	st := updateStatus{CheckedAt: time.Now()}
 	rel, err := u.fetchRelease(ctx)
 	if err != nil {
-		return err
+		st.Error = err.Error()
+		u.setStatus(st)
+		return st, err
+	}
+	st.Latest = rel.Version
+	st.Available = newerVersion(u.version, rel.Version)
+	u.setStatus(st)
+	return st, nil
+}
+
+// installLatest applies a strictly-newer release: it downloads it, verifies
+// its checksum in memory, and renames it over the running executable. It does
+// not restart. It returns the installed version, or "" when already current.
+// Any failure leaves the installed binary untouched.
+func (u *updater) installLatest(ctx context.Context) (string, error) {
+	rel, err := u.fetchRelease(ctx)
+	if err != nil {
+		return "", err
 	}
 	if !newerVersion(u.version, rel.Version) {
-		return nil
+		return "", nil
 	}
 	data, err := u.downloadVerified(ctx, rel)
 	if err != nil {
-		return fmt.Errorf("download %s: %w", rel.Version, err)
+		return "", fmt.Errorf("download %s: %w", rel.Version, err)
 	}
 	exe, err := u.exePath()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := u.apply(exe, data); err != nil {
-		return fmt.Errorf("apply %s: %w", rel.Version, err)
+		return "", fmt.Errorf("apply %s: %w", rel.Version, err)
 	}
-	fmt.Fprintf(u.logw, "pi-web: updated %s -> %s, restarting\n", u.version, rel.Version)
-	u.restart()
+	return rel.Version, nil
+}
+
+// checkAndApply installs a newer release and restarts. It is the auto-apply
+// primitive exercised directly by tests.
+func (u *updater) checkAndApply(ctx context.Context) error {
+	v, err := u.installLatest(ctx)
+	if err != nil {
+		return err
+	}
+	if v != "" {
+		fmt.Fprintf(u.logw, "pi-web: updated %s -> %s, restarting\n", u.version, v)
+		u.restart()
+	}
 	return nil
+}
+
+func (u *updater) setStatus(st updateStatus) {
+	u.mu.Lock()
+	u.last = st
+	u.mu.Unlock()
+}
+
+// status returns the cached check result plus the static build facts the UI
+// needs.
+func (u *updater) status() map[string]any {
+	u.mu.Lock()
+	st := u.last
+	u.mu.Unlock()
+	out := map[string]any{
+		"current":    u.version,
+		"latest":     st.Latest,
+		"available":  st.Available,
+		"error":      st.Error,
+		"autoUpdate": u.auto.Load(),
+		"canUpdate":  u.canUpdate(),
+	}
+	if !st.CheckedAt.IsZero() {
+		out["checkedAt"] = st.CheckedAt
+	}
+	return out
+}
+
+// setAuto flips auto-apply and persists the choice so it survives restarts.
+func (u *updater) setAuto(enabled bool) error {
+	u.auto.Store(enabled)
+	return saveSettings(u.settingsPath, settings{AutoUpdate: enabled})
 }
 
 func (u *updater) fetchRelease(ctx context.Context) (releaseInfo, error) {

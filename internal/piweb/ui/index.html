@@ -8,6 +8,8 @@
 </head>
 <body>
 
+<div class="nav-backdrop" id="nav-backdrop"></div>
+
 <aside class="rail">
   <div class="rail-head">
     <div class="brand">PI<span>.</span></div>
@@ -23,15 +25,38 @@
     <pre class="gitgraph" id="repo-graph"></pre>
   </div>
   <div class="railfoot stamp" id="stats-panel">
-    <div class="kv"><span class="k">model</span><span class="v" id="stat-model">—</span></div>
+    <div class="kv ctl"><span class="k">model</span>
+      <div class="dd" id="model-dd" data-value="">
+        <button class="dd-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+          <span class="dd-label">—</span><span class="dd-caret">▾</span>
+        </button>
+        <div class="dd-menu" role="listbox" hidden></div>
+      </div></div>
+    <div class="kv ctl"><span class="k">think</span>
+      <div class="dd" id="thinking-dd" data-value="off">
+        <button class="dd-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+          <span class="dd-label">off</span><span class="dd-caret">▾</span>
+        </button>
+        <div class="dd-menu" role="listbox" hidden></div>
+      </div></div>
     <div class="kv"><span class="k">tokens</span><span class="v" id="stat-tokens">—</span></div>
     <div class="kv"><span class="k">context</span><span class="v" id="stat-context">—</span></div>
     <div class="kv"><span class="k">link</span><span class="v" id="stat-link">idle</span></div>
+  </div>
+  <div class="railfoot update stamp" id="update-panel">
+    <div class="kv"><span class="k">version</span><span class="v" id="update-current">—</span></div>
+    <div class="upd-status" id="update-status">click check</div>
+    <div class="upd-actions">
+      <button class="btn tiny" id="update-check">Check</button>
+      <button class="btn tiny hot" id="update-apply" hidden>Update &amp; restart</button>
+    </div>
+    <label class="upd-auto"><input type="checkbox" id="update-auto"> auto-update</label>
   </div>
 </aside>
 
 <main class="main">
   <header class="tophead">
+    <button class="menu-btn" id="menu-toggle" aria-label="Toggle sessions">☰</button>
     <h1 id="session-title">pi</h1>
     <span class="chip stamp hot" id="working-chip" hidden>agent working</span>
     <span class="chip stamp" id="session-chip" hidden></span>
@@ -58,6 +83,23 @@
     </div>
   </footer>
 </main>
+
+<div class="overlay" id="newsession-overlay" hidden>
+  <div class="overlay-box">
+    <div class="overlay-head stamp">
+      <span>New session — choose working folder</span>
+      <button class="btn" id="ns-close">Close</button>
+    </div>
+    <div class="ns-body">
+      <div class="ns-path" id="ns-path"></div>
+      <div class="ns-dirs" id="ns-dirs"></div>
+      <div class="ns-actions">
+        <button class="btn" id="ns-up">↑ Parent</button>
+        <button class="btn send" id="ns-start">Start here</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="overlay" id="file-overlay" hidden>
   <div class="overlay-box">

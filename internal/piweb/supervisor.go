@@ -34,6 +34,7 @@ type agentState struct {
 type session struct {
 	id   string
 	file string
+	cwd  string
 
 	mu         sync.Mutex
 	rpc        *rpcClient
@@ -138,13 +139,18 @@ func (sv *supervisor) piCommand(sessionRef string) []string {
 	return cmd
 }
 
-// spawn starts a pi child and resolves its identity via get_state.
-func (sv *supervisor) spawn(ctx context.Context, sessionRef string) (*session, error) {
+// spawn starts a pi child in workDir and resolves its identity via get_state.
+// An empty workDir falls back to the server's configured workspace.
+func (sv *supervisor) spawn(ctx context.Context, sessionRef, workDir string) (*session, error) {
+	if workDir == "" {
+		workDir = sv.cfg.Workspace
+	}
 	s := &session{
 		subs:       make(map[chan []byte]struct{}),
 		lastActive: time.Now(),
+		cwd:        workDir,
 	}
-	rpc, err := startRPCClient(sv.piCommand(sessionRef), sv.cfg.Workspace, os.Environ(), s.broadcast)
+	rpc, err := startRPCClient(sv.piCommand(sessionRef), workDir, os.Environ(), s.broadcast)
 	if err != nil {
 		return nil, err
 	}
@@ -169,9 +175,9 @@ func (sv *supervisor) spawn(ctx context.Context, sessionRef string) (*session, e
 	return s, nil
 }
 
-// create starts a brand-new session.
-func (sv *supervisor) create(ctx context.Context) (*session, error) {
-	s, err := sv.spawn(ctx, "")
+// create starts a brand-new session in cwd (empty cwd uses the workspace).
+func (sv *supervisor) create(ctx context.Context, cwd string) (*session, error) {
+	s, err := sv.spawn(ctx, "", cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +198,19 @@ func (sv *supervisor) get(ctx context.Context, id string) (*session, error) {
 		return s, nil
 	}
 
-	s, err := sv.spawn(ctx, id)
+	// Resume by file path when we can find it: pi's bare-id lookup misses
+	// legacy per-project layouts, and a path avoids the interactive
+	// "fork into current directory?" prompt for project-scoped sessions.
+	ref := id
+	workDir := ""
+	if path, cwd, found := sessionFileByID(sv.cfg.SessionDir, id); found {
+		ref = path
+		if isDir(cwd) {
+			workDir = cwd
+		}
+	}
+
+	s, err := sv.spawn(ctx, ref, workDir)
 	if err != nil {
 		return nil, err
 	}
@@ -209,6 +227,15 @@ func (sv *supervisor) get(ctx context.Context, id string) (*session, error) {
 	sv.sessions[id] = s
 	sv.mu.Unlock()
 	return s, nil
+}
+
+// isDir reports whether path exists and is a directory.
+func isDir(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // live reports the session ids with a running pi child.

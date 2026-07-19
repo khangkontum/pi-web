@@ -9,7 +9,7 @@ embedded chat UI plus a small JSON API. It drives `pi --mode rpc`
 - `cmd/pi-web/` — CLI entrypoint; all logic lives in `internal/piweb`.
 - `internal/piweb/piweb.go` — config, flags, `Main`/`Run`, the `Version`
   constant.
-- `internal/piweb/server.go` — HTTP routes and the `Protocol` constant.
+- `internal/piweb/server.go` — HTTP routes.
 - `internal/piweb/supervisor.go` — child-process lifecycle, one pi per live
   session.
 - `internal/piweb/rpc.go` — JSONL RPC client over the child's stdio.
@@ -36,7 +36,10 @@ Keep these true — they are the product:
 - **Stateless by design.** Sessions are pi's JSONL files under the session
   directory. pi-web must never grow its own database, cache file, or
   duplicate session state. If pi-web dies, `pi` in a terminal resumes the
-  same sessions untouched.
+  same sessions untouched. The one sanctioned exception is `settings.go`: a
+  single small preference file (currently just the auto-update toggle) under
+  the user config dir. It holds no session state; keep it that narrow, and
+  do not use it as a foothold for caches or duplicated pi state.
 - **Loopback trust model.** pi-web binds loopback and authenticates nobody.
   Do not add auth, TLS, accounts, or session cookies — access control is the
   job of whatever fronts it. Decline features that only make sense with
@@ -60,15 +63,16 @@ Keep these true — they are the product:
 
 ## The HTTP Contract
 
-The browser-facing API is a public contract:
+The browser-facing API is served to the embedded UI (same binary, always
+version-matched). There is no separate API version number: the UI ships with
+its server, so it cannot mismatch, and no external client is a supported use
+case.
 
-- `GET /version` returns `{service, protocol, version}`.
-- Bump `Protocol` in `server.go` whenever any route, request, or response
-  changes shape. Clients use it to detect incompatibility; a silent shape
-  change is a breaking bug.
+- `GET /version` returns `{service, version}`.
 - Routes are registered in `newServer` — keep that the single place paths
-  are spelled out, and keep the README's API table in sync in the same
-  change.
+  are spelled out, and keep the API table in `docs/reference.md` in sync in
+  the same change. The README stays thin (what it is + usage); route/contract
+  detail lives in `docs/reference.md`.
 
 ## Testing
 
@@ -90,7 +94,8 @@ The browser-facing API is a public contract:
   release — the tag is the version.
 - `release.json` is the update-check contract (stable URL:
   `releases/latest/download/release.json`). If you change its shape, treat
-  it like an API change: additive when possible, and update the README.
+  it like an API change: additive when possible, and update
+  `docs/reference.md`.
 
 ## Style
 

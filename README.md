@@ -31,83 +31,16 @@ Requires the `pi` CLI on `PATH` (or point `--pi-bin` at it).
 pi-web --workspace ~/code/myproject
 ```
 
-Then open http://127.0.0.1:9999.
+Then open http://127.0.0.1:9999 and start a session. Pick a working folder,
+model, and reasoning effort from the UI; sessions are shared with the `pi` CLI
+in a terminal.
 
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--addr` | `127.0.0.1:9999` | Listen address (keep on loopback unless a trusted proxy fronts it) |
-| `--workspace` | current directory | Agent working directory |
-| `--session-dir` | `~/.pi/agent/sessions` | pi session storage directory |
-| `--pi-bin` | `pi` | pi coding agent binary |
-| `--update-url` | latest `release.json` | Release metadata URL polled for self-update |
-| `--update-interval` | `6h` | Self-update check interval (`0` disables) |
-| `--version` | | Print version and exit |
+> pi-web binds loopback and authenticates nobody — anything that can reach the
+> socket can drive the agent. Expose it only behind something that
+> authenticates (a reverse proxy, an SSH tunnel), or not at all.
 
-### Self-update
-
-Release builds check `--update-url` on an interval. When a newer version is
-published, pi-web downloads the binary for its platform, verifies its sha256
-against `checksums.txt` in memory, renames it over the running executable
-(with a non-interactive `sudo` fallback when the install directory is
-root-owned), and restarts — via exit under systemd, or by re-execing itself
-elsewhere. Dev builds (`go install`, version `dev`) never self-update. Any
-failure leaves the installed binary untouched.
-
-### Security model
-
-pi-web binds loopback and performs no authentication of its own; it trusts
-every caller. Anything that can reach the socket can drive the agent — and
-the agent can run commands. Expose it only through something that
-authenticates (a reverse proxy, an SSH tunnel), or not at all.
-
-### Running under systemd
-
-```ini
-[Unit]
-Description=pi-web
-After=network-online.target
-
-[Service]
-User=you
-WorkingDirectory=/home/you/workspace
-ExecStart=/usr/local/bin/pi-web --workspace /home/you/workspace
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-```
-
-## HTTP API
-
-`GET /version` returns `{service, protocol, version}`. `protocol` is bumped
-whenever the API changes shape; clients should check it before assuming
-compatibility.
-
-| Route | Purpose |
-| --- | --- |
-| `GET /api/sessions` | List sessions (stored + live) |
-| `POST /api/sessions` | Create a session, optionally with a first message |
-| `GET /api/sessions/{id}/events` | SSE stream of agent events |
-| `POST /api/sessions/{id}/message` | Send a message to a session |
-| `POST /api/sessions/{id}/abort` | Abort the current turn |
-| `POST /api/sessions/{id}/bash` | Run a shell command in the workspace |
-| `GET /api/git` | Workspace git summary |
-| `GET /api/file` | Read a workspace file |
-
-## Releases
-
-Tagging `vX.Y.Z` publishes a GitHub release with per-platform binaries,
-`checksums.txt`, and `release.json`. The latest release metadata is always at
-the stable URL:
-
-```
-https://github.com/khangkontum/pi-web/releases/latest/download/release.json
-```
-
-`release.json` carries `{version, commit, published_at, protocol,
-checksums_url, download_urls}` — everything a client needs to check for and
-verify an update without touching the GitHub API.
+Run `pi-web --help` for all flags. See [docs/reference.md](docs/reference.md)
+for the HTTP API, self-update, deployment, and release details.
 
 ## Development
 

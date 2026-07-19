@@ -42,9 +42,15 @@ type Config struct {
 	Version   string
 	// UpdateURL is the release.json endpoint polled for new versions.
 	UpdateURL string
-	// UpdateInterval is the self-update check cadence; 0 disables
-	// self-update entirely.
+	// UpdateInterval is the update check cadence; 0 disables the background
+	// check loop (manual checks via the API still work).
 	UpdateInterval time.Duration
+	// AutoUpdate seeds whether a newer release is applied automatically. The
+	// persisted preference in SettingsPath overrides it when present.
+	AutoUpdate bool
+	// SettingsPath is where the auto-update preference is persisted; empty
+	// keeps the choice in memory only.
+	SettingsPath string
 }
 
 // Main is the pi-web entry point. It returns a process exit code.
@@ -55,14 +61,15 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	workspace := fs.String("workspace", "", "agent working directory (default: current directory)")
 	sessionDir := fs.String("session-dir", "", "pi session storage directory (default: ~/.pi/agent/sessions)")
 	piBin := fs.String("pi-bin", "pi", "pi coding agent binary")
-	updateURL := fs.String("update-url", DefaultUpdateURL, "release metadata URL polled for self-update")
-	updateInterval := fs.Duration("update-interval", DefaultUpdateInterval, "self-update check interval (0 disables)")
+	updateURL := fs.String("update-url", DefaultUpdateURL, "release metadata URL polled for updates")
+	updateInterval := fs.Duration("update-interval", DefaultUpdateInterval, "update check interval (0 disables the background check loop)")
+	autoUpdate := fs.Bool("auto-update", false, "apply newer releases automatically (seeds the persisted UI toggle)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *showVersion {
-		fmt.Fprintf(stdout, "pi-web %s (protocol %d)\n", Version, Protocol)
+		fmt.Fprintf(stdout, "pi-web %s\n", Version)
 		return 0
 	}
 
@@ -73,6 +80,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		Version:        Version,
 		UpdateURL:      *updateURL,
 		UpdateInterval: *updateInterval,
+		AutoUpdate:     *autoUpdate,
+		SettingsPath:   defaultSettingsPath(),
 	}
 	if cfg.Workspace == "" {
 		wd, err := os.Getwd()
@@ -107,17 +116,16 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	sv := newSupervisor(cfg)
 	defer sv.closeAll()
 
-	if cfg.UpdateInterval > 0 {
-		if _, ok := parseVersion(cfg.Version); ok {
-			go newUpdater(cfg, logw).run(ctx)
-		} else {
-			fmt.Fprintf(logw, "pi-web: self-update disabled for %s build\n", cfg.Version)
-		}
+	upd := newUpdater(cfg, logw)
+	if !upd.canUpdate() {
+		fmt.Fprintf(logw, "pi-web: self-update disabled for %s build\n", cfg.Version)
+	} else if cfg.UpdateInterval > 0 {
+		go upd.run(ctx)
 	}
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           newServer(cfg, sv),
+		Handler:           newServer(cfg, sv, upd),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

@@ -90,7 +90,6 @@ func updateFixture(t *testing.T, version string, binary []byte, corruptSum bool)
 		json.NewEncoder(w).Encode(releaseInfo{
 			Version:      version,
 			PublishedAt:  time.Now(),
-			Protocol:     Protocol,
 			ChecksumsURL: srv.URL + "/checksums.txt",
 			DownloadURLs: map[string]string{key: srv.URL + "/bin"},
 		})

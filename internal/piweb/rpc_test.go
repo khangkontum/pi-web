@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -15,10 +18,28 @@ func TestHelperPiRPC(t *testing.T) {
 	if os.Getenv("GO_PIWEB_HELPER") != "1" {
 		t.Skip("helper process")
 	}
+	// --list-models is a one-shot: emit a fixed table and exit, mirroring the
+	// real pi CLI the models endpoint shells out to.
+	if slices.Contains(os.Args, "--list-models") {
+		fmt.Print("provider  model  context  max-out  thinking  images\n")
+		fmt.Print("stubco  stub-model  128K  16.4K  no  no\n")
+		fmt.Print("stubco  stub-think  270K  32K  yes  yes\n")
+		return
+	}
+
 	sessionID := "aaaaaaaa-0000-0000-0000-000000000000"
 	for i, arg := range os.Args {
 		if arg == "--session" && i+1 < len(os.Args) {
-			sessionID = os.Args[i+1]
+			ref := os.Args[i+1]
+			// pi resolves a --session path by reading the file's header id;
+			// a bare id is used verbatim. Mirror both.
+			if strings.HasSuffix(ref, ".jsonl") {
+				if id := stubHeaderID(ref); id != "" {
+					sessionID = id
+				}
+			} else {
+				sessionID = ref
+			}
 		}
 	}
 
@@ -44,11 +65,14 @@ func TestHelperPiRPC(t *testing.T) {
 	scanner.Buffer(make([]byte, 64<<10), 8<<20)
 	for scanner.Scan() {
 		var cmd struct {
-			Type    string `json:"type"`
-			ID      string `json:"id"`
-			Message string `json:"message"`
-			Command string `json:"command"`
-			Name    string `json:"name"`
+			Type     string `json:"type"`
+			ID       string `json:"id"`
+			Message  string `json:"message"`
+			Command  string `json:"command"`
+			Name     string `json:"name"`
+			Provider string `json:"provider"`
+			ModelID  string `json:"modelId"`
+			Level    string `json:"level"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &cmd); err != nil {
 			continue
@@ -75,6 +99,10 @@ func TestHelperPiRPC(t *testing.T) {
 			})
 		case "set_session_name":
 			respond(cmd.ID, "set_session_name", nil)
+		case "set_model":
+			respond(cmd.ID, "set_model", map[string]any{"provider": cmd.Provider, "id": cmd.ModelID, "name": cmd.ModelID})
+		case "set_thinking_level":
+			respond(cmd.ID, "set_thinking_level", map[string]any{"level": cmd.Level})
 		case "prompt":
 			respond(cmd.ID, "prompt", nil)
 			emit(map[string]any{"type": "agent_start"})
@@ -107,6 +135,27 @@ func TestHelperPiRPC(t *testing.T) {
 	}
 }
 
+// stubHeaderID reads the session id from a session file's first JSONL line,
+// the same way pi resolves a --session path.
+func stubHeaderID(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		return ""
+	}
+	var header struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+		return ""
+	}
+	return header.ID
+}
+
 // helperPiCommand returns an argv that re-executes this test binary as the
 // stub pi process.
 func helperPiCommand() []string {
@@ -117,11 +166,12 @@ func helperConfig(t *testing.T) Config {
 	t.Helper()
 	t.Setenv("GO_PIWEB_HELPER", "1")
 	return Config{
-		Addr:       "127.0.0.1:0",
-		Workspace:  t.TempDir(),
-		SessionDir: t.TempDir(),
-		PiCommand:  helperPiCommand(),
-		Version:    "test",
+		Addr:         "127.0.0.1:0",
+		Workspace:    t.TempDir(),
+		SessionDir:   t.TempDir(),
+		PiCommand:    helperPiCommand(),
+		Version:      "test",
+		SettingsPath: filepath.Join(t.TempDir(), "settings.json"),
 	}
 }
 
@@ -185,6 +235,25 @@ func TestRPCClientReportsExit(t *testing.T) {
 	}
 	if _, err := client.request(t.Context(), map[string]any{"type": "get_state"}); err == nil {
 		t.Fatal("expected error requesting on closed client")
+	}
+}
+
+func TestSupervisorResumesLegacyByPath(t *testing.T) {
+	cfg := helperConfig(t)
+	sv := newSupervisor(cfg)
+	defer sv.closeAll()
+
+	// A legacy per-project session file whose id pi's bare-id lookup would
+	// miss; the supervisor must resolve it to a path and resume it.
+	id := "dddddddd-0000-0000-0000-000000000000"
+	writeSessionFixture(t, cfg.SessionDir, id, "legacy session")
+
+	s, err := sv.get(t.Context(), id)
+	if err != nil {
+		t.Fatalf("resume by path: %v", err)
+	}
+	if s.id != id {
+		t.Fatalf("resumed id = %q, want %q", s.id, id)
 	}
 }
 

@@ -54,6 +54,59 @@ func listSessions(dir string) ([]SessionInfo, error) {
 	return out, nil
 }
 
+// sessionFileByID walks dir for the stored session whose header id equals id
+// and returns its file path plus the cwd recorded in its header. pi's
+// --session flag accepts a file path, and the path form resolves legacy
+// per-project session layouts that pi's bare-id lookup can no longer find.
+func sessionFileByID(dir, id string) (path, cwd string, ok bool) {
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+		hid, hcwd, hok := readSessionHeader(p)
+		if hok && hid == id {
+			path, cwd, ok = p, hcwd, true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return path, cwd, ok
+}
+
+// readSessionHeader reads only the first JSONL line of a session file and
+// returns its id and cwd.
+func readSessionHeader(path string) (id, cwd string, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", "", false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64<<10), sessionHeadScanLimit)
+	if !scanner.Scan() {
+		return "", "", false
+	}
+	var header struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+		Cwd  string `json:"cwd"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+		return "", "", false
+	}
+	if header.Type != "session" || header.ID == "" {
+		return "", "", false
+	}
+	return header.ID, header.Cwd, true
+}
+
 // readSessionInfo parses the session header line and derives a display title
 // from the first user message within a bounded prefix of the file.
 func readSessionInfo(path string) (SessionInfo, bool) {

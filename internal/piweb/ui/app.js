@@ -10,11 +10,17 @@
     streaming: false,
     toolOutputs: {},       // toolCallId -> <pre> element for live tool output
     streamingMsgEl: null,  // container for the in-flight assistant message
+    cwd: null,             // active session's working directory
+    models: [],            // catalogue from /api/models
+    pendingCwd: null,      // folder chosen for the next new session
+    pending: false,        // true while composing a not-yet-created session
   };
 
   var $ = function (id) { return document.getElementById(id); };
   var feed = $("feed");
   var input = $("input");
+  var modelDD = null;     // custom model dropdown controller
+  var thinkingDD = null;  // custom thinking-effort dropdown controller
 
   // ---------- helpers ----------
 
@@ -23,6 +29,86 @@
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
+  }
+
+  // createDropdown builds a custom listbox over a .dd container so we never
+  // rely on a native <select> (which can't match the panel identity and
+  // renders a platform-native popup). onSelect(sel) fires on a user pick.
+  function createDropdown(id, onSelect) {
+    var root = $(id);
+    var trigger = root.querySelector(".dd-trigger");
+    var labelEl = root.querySelector(".dd-label");
+    var menu = root.querySelector(".dd-menu");
+
+    function findOpt(value) {
+      var opts = menu.querySelectorAll(".dd-opt");
+      for (var i = 0; i < opts.length; i++) {
+        if (opts[i].dataset.value === value) return opts[i];
+      }
+      return null;
+    }
+    function open() { menu.hidden = false; root.classList.add("open"); trigger.setAttribute("aria-expanded", "true"); }
+    function close() { menu.hidden = true; root.classList.remove("open"); trigger.setAttribute("aria-expanded", "false"); }
+
+    trigger.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      if (menu.hidden) open(); else close();
+    });
+    document.addEventListener("click", function (ev) { if (!root.contains(ev.target)) close(); });
+    document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") close(); });
+
+    var api = {
+      setOptions: function (items) {
+        var keep = root.dataset.value || "";
+        menu.textContent = "";
+        var lastGroup = null;
+        items.forEach(function (it) {
+          if (it.group && it.group !== lastGroup) {
+            lastGroup = it.group;
+            menu.appendChild(el("div", "dd-group", it.group));
+          }
+          var b = el("button", "dd-opt", it.label);
+          b.type = "button";
+          b.dataset.value = it.value;
+          if (it.provider !== undefined) b.dataset.provider = it.provider;
+          if (it.model !== undefined) b.dataset.model = it.model;
+          b.addEventListener("click", function () {
+            api.select(it.value);
+            close();
+            if (onSelect) onSelect(api.selected());
+          });
+          menu.appendChild(b);
+        });
+        if (findOpt(keep)) api.select(keep);
+      },
+      select: function (value) {
+        value = value == null ? "" : value;
+        root.dataset.value = value;
+        var opt = findOpt(value);
+        labelEl.textContent = opt ? opt.textContent : (value || "—");
+        var opts = menu.querySelectorAll(".dd-opt");
+        for (var i = 0; i < opts.length; i++) {
+          opts[i].classList.toggle("sel", opts[i].dataset.value === value);
+        }
+        return opt;
+      },
+      // setLabel forces a display value that is not in the option list (e.g. a
+      // model the catalogue does not include).
+      setLabel: function (text, value, provider, model) {
+        root.dataset.value = value || "";
+        root.dataset.provider = provider || "";
+        root.dataset.model = model || "";
+        labelEl.textContent = text;
+      },
+      value: function () { return root.dataset.value || ""; },
+      selected: function () {
+        var v = root.dataset.value || "";
+        var opt = findOpt(v);
+        if (opt) return { value: v, provider: opt.dataset.provider, model: opt.dataset.model, label: opt.textContent };
+        return { value: v, provider: root.dataset.provider || "", model: root.dataset.model || "" };
+      },
+    };
+    return api;
   }
 
   function fmtTime(ms) {
@@ -62,6 +148,11 @@
     feed.scrollTop = feed.scrollHeight;
   }
 
+  // closeNav retracts the mobile sessions drawer (a no-op on desktop).
+  function closeNav() {
+    document.body.classList.remove("nav-open");
+  }
+
   function nearBottom() {
     return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 160;
   }
@@ -84,7 +175,8 @@
   }
 
   function refreshGit() {
-    api("/api/git").then(function (info) {
+    var q = state.cwd ? "?base=" + encodeURIComponent(state.cwd) : "";
+    api("/api/git" + q).then(function (info) {
       var panel = $("repo-panel");
       if (!info.repo) { panel.hidden = true; return; }
       panel.hidden = false;
@@ -96,20 +188,28 @@
 
   function setStats(stats) {
     if (!stats) return;
-    var model = $("stat-model");
     if (stats.tokens) {
       $("stat-tokens").textContent = "↑" + fmtTokens(stats.tokens.input) + " ↓" + fmtTokens(stats.tokens.output);
     }
     if (stats.contextUsage && stats.contextUsage.percent !== null && stats.contextUsage.percent !== undefined) {
       $("stat-context").textContent = Math.round(stats.contextUsage.percent) + "%";
     }
-    if (model.textContent === "—" && stats.sessionId) {
-      // model is set from state; stats keeps tokens fresh
+  }
+
+  // selectModel points the model dropdown at the session's current model,
+  // falling back to a display-only label when it is not in the catalogue.
+  function selectModel(model) {
+    if (!model || !model.id) { modelDD.select(""); return; }
+    var value = (model.provider || "") + "/" + model.id;
+    if (!modelDD.select(value)) {
+      modelDD.setLabel(model.id, value, model.provider || "", model.id);
     }
   }
 
   function setModelFromState(st) {
-    if (st && st.model && st.model.id) $("stat-model").textContent = st.model.id;
+    if (!st) return;
+    if (st.model) selectModel(st.model);
+    if (st.thinkingLevel) thinkingDD.select(st.thinkingLevel);
   }
 
   function setStreaming(on) {
@@ -273,6 +373,8 @@
 
   function applySnapshot(snap) {
     clearFeed();
+    state.cwd = snap.cwd || null;
+    refreshGit();
     var st = snap.state || {};
     setModelFromState(st);
     setStreaming(!!st.isStreaming);
@@ -344,6 +446,12 @@
       case "piweb_bash":
         if (ev.result) appendBashRow(ev.command, ev.result.output, ev.result.exitCode);
         break;
+      case "piweb_model":
+        if (ev.model) selectModel(ev.model);
+        break;
+      case "piweb_thinking":
+        if (ev.level) thinkingDD.select(ev.level);
+        break;
       default:
         break;
     }
@@ -353,6 +461,7 @@
   // ---------- session lifecycle ----------
 
   function openSession(id, title) {
+    closeNav();
     if (state.source) { state.source.close(); state.source = null; }
     state.sessionId = id;
     $("empty-state") && $("empty-state").remove();
@@ -379,11 +488,21 @@
   function createSession(message) {
     var body = {};
     if (message) body.message = message;
+    if (state.pendingCwd) body.cwd = state.pendingCwd;
+    var sel = modelDD.selected();
+    if (sel && sel.model) {
+      body.provider = sel.provider;
+      body.modelId = sel.model;
+    }
+    var think = thinkingDD.value();
+    if (think) body.thinking = think;
     return api("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(function (resp) {
+      state.pending = false;
+      state.pendingCwd = null;
       openSession(resp.id, message ? message.slice(0, 60) : "new session");
       return refreshSessions();
     });
@@ -444,11 +563,161 @@
   // ---------- file viewer ----------
 
   function openFile(path) {
-    api("/api/file?path=" + encodeURIComponent(path)).then(function (view) {
+    var q = "/api/file?path=" + encodeURIComponent(path);
+    if (state.cwd) q += "&base=" + encodeURIComponent(state.cwd);
+    api(q).then(function (view) {
       $("file-path").textContent = view.path + (view.truncated ? " (truncated)" : "");
       $("file-content").textContent = view.binary ? "(binary file, " + view.size + " bytes)" : view.content;
       $("file-overlay").hidden = false;
     }).catch(showSendError);
+  }
+
+  // ---------- model + thinking ----------
+
+  function refreshModels() {
+    return api("/api/models").then(function (data) {
+      state.models = data.models || [];
+      var items = [{ value: "", label: "—" }];
+      state.models.forEach(function (m) {
+        items.push({ value: m.provider + "/" + m.model, label: m.model, provider: m.provider, model: m.model, group: m.provider });
+      });
+      modelDD.setOptions(items);
+    }).catch(function () { /* best-effort */ });
+  }
+
+  function onModelChange(sel) {
+    if (!sel || !sel.model || !state.sessionId) return;
+    api("/api/sessions/" + encodeURIComponent(state.sessionId) + "/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: sel.provider, modelId: sel.model }),
+    }).catch(showSendError);
+  }
+
+  function onThinkingChange(sel) {
+    if (!state.sessionId) return;
+    api("/api/sessions/" + encodeURIComponent(state.sessionId) + "/thinking", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level: sel.value }),
+    }).catch(showSendError);
+  }
+
+  // ---------- update panel ----------
+
+  function renderUpdate(s) {
+    $("update-current").textContent = s.current || "—";
+    $("update-auto").checked = !!s.autoUpdate;
+    var status = $("update-status");
+    if (!s.canUpdate) {
+      status.textContent = "dev build — no self-update";
+      $("update-apply").hidden = true;
+      $("update-check").disabled = true;
+      $("update-auto").disabled = true;
+      return;
+    }
+    if (s.error) status.textContent = "check failed";
+    else if (s.available) status.textContent = s.latest + " available";
+    else if (s.checkedAt) status.textContent = "up to date";
+    else status.textContent = "click check";
+    $("update-apply").hidden = !s.available;
+  }
+
+  function refreshUpdate() {
+    return api("/api/update").then(renderUpdate).catch(function () {});
+  }
+
+  function onUpdateCheck() {
+    $("update-status").textContent = "checking…";
+    api("/api/update/check", { method: "POST" })
+      .then(renderUpdate)
+      .catch(function () { $("update-status").textContent = "check failed"; });
+  }
+
+  function onUpdateApply() {
+    if (!window.confirm("Download the update and restart pi-web now?")) return;
+    $("update-status").textContent = "updating…";
+    api("/api/update/apply", { method: "POST" }).then(function (r) {
+      if (r.applied) waitForRestart();
+      else $("update-status").textContent = "up to date";
+    }).catch(function () { $("update-status").textContent = "update failed"; });
+  }
+
+  function waitForRestart() {
+    $("update-status").textContent = "restarting…";
+    var tries = 0;
+    var iv = setInterval(function () {
+      tries++;
+      fetch("/version").then(function (r) { return r.json(); }).then(function () {
+        clearInterval(iv);
+        location.reload();
+      }).catch(function () {
+        if (tries > 60) { clearInterval(iv); $("update-status").textContent = "reload to continue"; }
+      });
+    }, 1000);
+  }
+
+  function onUpdateAuto() {
+    api("/api/update/auto", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: $("update-auto").checked }),
+    }).then(renderUpdate).catch(function () {});
+  }
+
+  // ---------- new-session folder picker ----------
+
+  function openNewSession() {
+    closeNav();
+    state.pendingCwd = null;
+    loadDirs("");
+    $("newsession-overlay").hidden = false;
+  }
+
+  function loadDirs(path) {
+    var q = path ? "?path=" + encodeURIComponent(path) : "";
+    api("/api/dirs" + q).then(renderDirs).catch(showSendError);
+  }
+
+  function renderDirs(data) {
+    var overlay = $("newsession-overlay");
+    overlay.dataset.path = data.path;
+    overlay.dataset.parent = data.parent || "";
+    $("ns-path").textContent = data.path;
+    var box = $("ns-dirs");
+    box.textContent = "";
+    (data.dirs || []).forEach(function (name) {
+      var b = el("button", "ns-dir", name);
+      b.addEventListener("click", function () {
+        loadDirs(data.path.replace(/\/+$/, "") + "/" + name);
+      });
+      box.appendChild(b);
+    });
+    if (!(data.dirs || []).length) box.appendChild(el("div", "ns-empty stamp", "no subfolders"));
+    $("ns-up").disabled = !data.parent;
+  }
+
+  function startHere() {
+    var path = $("newsession-overlay").dataset.path || null;
+    $("newsession-overlay").hidden = true;
+    beginNewSession(path);
+  }
+
+  function beginNewSession(cwd) {
+    if (state.source) { state.source.close(); state.source = null; }
+    state.sessionId = null;
+    state.cwd = cwd || null;
+    state.pendingCwd = cwd || null;
+    state.pending = true;
+    clearFeed();
+    refreshGit();
+    $("session-title").textContent = "new session";
+    $("session-chip").hidden = true;
+    var hint = el("div", "empty");
+    hint.appendChild(el("div", "empty-title", "New session"));
+    hint.appendChild(el("div", "empty-sub", cwd ? "Starts in " + cwd + " — type a message below to begin." : "Type a message below to start."));
+    feed.appendChild(hint);
+    input.focus();
   }
 
   // ---------- wiring ----------
@@ -458,17 +727,17 @@
     if (!state.sessionId) return;
     api("/api/sessions/" + encodeURIComponent(state.sessionId) + "/abort", { method: "POST" }).catch(showSendError);
   });
-  $("new-session").addEventListener("click", function () {
-    if (state.source) { state.source.close(); state.source = null; }
-    state.sessionId = null;
-    clearFeed();
-    $("session-title").textContent = "new session";
-    $("session-chip").hidden = true;
-    var hint = el("div", "empty");
-    hint.appendChild(el("div", "empty-title", "New session"));
-    hint.appendChild(el("div", "empty-sub", "Type a message below to start."));
-    feed.appendChild(hint);
-    input.focus();
+  $("menu-toggle").addEventListener("click", function () { document.body.classList.toggle("nav-open"); });
+  $("nav-backdrop").addEventListener("click", closeNav);
+  $("new-session").addEventListener("click", openNewSession);
+  $("update-check").addEventListener("click", onUpdateCheck);
+  $("update-apply").addEventListener("click", onUpdateApply);
+  $("update-auto").addEventListener("change", onUpdateAuto);
+  $("ns-close").addEventListener("click", function () { $("newsession-overlay").hidden = true; });
+  $("ns-up").addEventListener("click", function () { loadDirs($("newsession-overlay").dataset.parent); });
+  $("ns-start").addEventListener("click", startHere);
+  $("newsession-overlay").addEventListener("click", function (ev) {
+    if (ev.target === $("newsession-overlay")) $("newsession-overlay").hidden = true;
   });
   $("file-close").addEventListener("click", function () { $("file-overlay").hidden = true; });
   $("file-overlay").addEventListener("click", function (ev) {
@@ -484,10 +753,19 @@
 
   // ---------- boot ----------
 
+  modelDD = createDropdown("model-dd", onModelChange);
+  thinkingDD = createDropdown("thinking-dd", onThinkingChange);
+  thinkingDD.setOptions(["off", "minimal", "low", "medium", "high", "xhigh"].map(function (l) {
+    return { value: l, label: l };
+  }));
+  thinkingDD.select("off");
+
   api("/version").then(function (v) {
     $("workspace-label").textContent = "pi-web " + v.version;
   }).catch(function () {});
   refreshGit();
+  refreshModels();
+  refreshUpdate();
   refreshSessions().then(function () {
     var first = document.querySelector(".sess");
     if (first) first.click();
