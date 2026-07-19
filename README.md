@@ -39,7 +39,19 @@ Then open http://127.0.0.1:9999.
 | `--workspace` | current directory | Agent working directory |
 | `--session-dir` | `~/.pi/agent/sessions` | pi session storage directory |
 | `--pi-bin` | `pi` | pi coding agent binary |
+| `--update-url` | latest `release.json` | Release metadata URL polled for self-update |
+| `--update-interval` | `6h` | Self-update check interval (`0` disables) |
 | `--version` | | Print version and exit |
+
+### Self-update
+
+Release builds check `--update-url` on an interval. When a newer version is
+published, pi-web downloads the binary for its platform, verifies its sha256
+against `checksums.txt` in memory, renames it over the running executable
+(with a non-interactive `sudo` fallback when the install directory is
+root-owned), and restarts — via exit under systemd, or by re-execing itself
+elsewhere. Dev builds (`go install`, version `dev`) never self-update. Any
+failure leaves the installed binary untouched.
 
 ### Security model
 

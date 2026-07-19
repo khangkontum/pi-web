@@ -50,6 +50,13 @@ Keep these true — they are the product:
   client speaks LF-delimited JSON over stdio: responses carry the request
   id, everything else is an event. Event callbacks run on the single read
   loop and must not block.
+- **Self-update never breaks the installed binary.** `update.go` verifies
+  the sha256 in memory before touching disk, always applies via `.new` +
+  rename (ETXTBSY-safe), uses only `sudo -n` (never prompts), and treats
+  any failure as "keep running the current version". Dev builds
+  (unparsable version) must never self-update. Updater tests stay hermetic:
+  inject `exePath`/`apply`/`restart`, never touch the real executable or
+  sudo.
 
 ## The HTTP Contract
 
