@@ -1,0 +1,350 @@
+/* pi-web — industrial-panel identity:
+   bone/concrete ground, near-black ink, safety-orange signal, hard offset
+   shadows, stencil labels. Layout is the "dispatch" shape: session rail plus
+   chat column. */
+
+:root {
+  --bone: #e2ddd0;
+  --paper: #f2eee3;
+  --panel: #e9e4d6;
+  --ink: #17160f;
+  --ink-2: #565243;
+  --accent: #f25c05;
+  --ok: #2b7434;
+  --amber: #d99700;
+  --err: #bf2b18;
+  --yellow: #f0b400;
+  --hairline: rgba(23, 22, 15, .22);
+  --shadow-sm: 3px 3px 0 var(--ink);
+  --font-text: "Archivo", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bone);
+  color: var(--ink);
+  font: 14.5px/1.55 var(--font-text);
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  grid-template-rows: 100vh;
+}
+.stamp {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .14em;
+}
+.lamp {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--ink);
+  margin-right: 6px;
+}
+.lamp-ok { background: var(--ok); }
+.lamp-run { background: var(--accent); animation: blinklamp 1.1s steps(2, start) infinite; }
+.lamp-err { background: var(--err); }
+@keyframes blinklamp { to { visibility: hidden; } }
+
+/* ---------------- rail ---------------- */
+.rail {
+  background: var(--panel);
+  border-right: 2px solid var(--ink);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.rail-head {
+  padding: 16px 16px 12px;
+  border-bottom: 2px solid var(--ink);
+  background: var(--paper);
+}
+.brand { font-size: 30px; line-height: 1; font-weight: 800; letter-spacing: .02em; }
+.brand span { color: var(--accent); }
+.rail-head .vm { margin-top: 4px; color: var(--ink-2); overflow-wrap: anywhere; }
+.newbtn {
+  margin: 14px 16px 6px;
+  font: 600 12px/1 var(--font-mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  background: var(--accent);
+  color: var(--ink);
+  border: 2px solid var(--ink);
+  box-shadow: var(--shadow-sm);
+  padding: 12px 14px;
+  cursor: pointer;
+}
+.newbtn:active { transform: translate(3px, 3px); box-shadow: 0 0 0 var(--ink); }
+.sessions { overflow-y: auto; flex: 1; padding: 8px 0; min-height: 60px; }
+.sess {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  padding: 10px 16px 10px 13px;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--hairline);
+  cursor: pointer;
+}
+.sess:hover { background: var(--paper); }
+.sess.active { background: var(--paper); border-left-color: var(--accent); }
+.sess .t {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess .m { font-family: var(--font-mono); font-size: 10px; color: var(--ink-2); margin-top: 2px; }
+.repo {
+  border-top: 2px solid var(--ink);
+  background: var(--paper);
+  padding: 10px 16px 12px;
+}
+.repo-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.repo-head .branch { font-family: var(--font-mono); font-size: 11px; font-weight: 600; }
+.repo-head .dirty { color: var(--amber); }
+.gitgraph {
+  margin: 0;
+  font: 10.5px/1.7 var(--font-mono);
+  overflow-x: auto;
+  color: var(--ink-2);
+  max-height: 140px;
+  overflow-y: auto;
+}
+.railfoot {
+  border-top: 2px solid var(--ink);
+  background: var(--paper);
+  padding: 10px 16px 12px;
+}
+.kv { display: flex; justify-content: space-between; padding: 3px 0; border-top: 1px solid var(--hairline); }
+.kv:first-child { border-top: 0; }
+.kv .k { color: var(--ink-2); }
+.kv .v { font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------------- main ---------------- */
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.tophead {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  border-bottom: 2px solid var(--ink);
+  background: var(--paper);
+  padding: 10px 22px;
+}
+.tophead h1 {
+  font: 600 15px/1.2 var(--font-text);
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip { border: 1.5px solid var(--ink); background: var(--panel); padding: 4px 8px; }
+.chip.hot { background: var(--accent); }
+
+.feed { flex: 1; overflow-y: auto; padding: 22px; min-height: 0; }
+.empty {
+  max-width: 860px;
+  margin: 40px auto;
+  border: 2px dashed var(--hairline);
+  padding: 28px;
+  text-align: center;
+  color: var(--ink-2);
+}
+.empty-title { font-weight: 700; text-transform: uppercase; letter-spacing: .1em; font-size: 13px; }
+.empty-sub { margin-top: 8px; font-size: 13px; }
+
+.msg { max-width: 860px; margin: 0 auto 18px; }
+.msg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 5px; }
+.msg-head .who { padding: 2px 7px; border: 1.5px solid var(--ink); background: var(--panel); }
+.msg.user .msg-head .who { background: var(--ink); color: var(--bone); }
+.msg.agent .msg-head .who { background: var(--accent); }
+.msg-head time { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-2); }
+.msg-body {
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  box-shadow: var(--shadow-sm);
+  padding: 12px 16px;
+}
+.msg.user .msg-body { background: var(--panel); box-shadow: none; }
+.msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-text + .msg-text { margin-top: 10px; }
+.msg-error { color: var(--err); font-family: var(--font-mono); font-size: 12px; margin-top: 8px; }
+
+details.thinking {
+  border: 1px solid var(--hairline);
+  background: var(--panel);
+  margin: 8px 0;
+}
+details.thinking > summary {
+  cursor: pointer;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+details.thinking > pre {
+  margin: 0;
+  padding: 8px 12px;
+  font: 11.5px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+
+.tool { max-width: 860px; margin: 0 auto 14px; border: 2px solid var(--ink); background: var(--paper); }
+.tool > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 8px 12px;
+  background: var(--panel);
+}
+.tool[open] > summary { border-bottom: 2px solid var(--ink); }
+.tool > summary::-webkit-details-marker { display: none; }
+.tool .tname { background: var(--ink); color: var(--bone); padding: 2px 7px; }
+.tool.exec .tname { background: var(--yellow); color: var(--ink); }
+.tool .tcmd {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool .tcmd a { color: inherit; }
+.tool .texit { color: var(--ok); white-space: nowrap; }
+.tool .texit.err { color: var(--err); }
+.tool pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font: 12px/1.55 var(--font-mono);
+  background: var(--paper);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.tool.writing pre { border-left: 6px solid var(--yellow); }
+.tool.exec pre { border-left: 6px solid var(--ink); background: var(--panel); }
+
+.caret {
+  display: inline-block;
+  width: .55em;
+  height: 1.05em;
+  background: var(--ink);
+  vertical-align: -2px;
+  animation: blinkc 1s steps(2, start) infinite;
+}
+@keyframes blinkc { to { visibility: hidden; } }
+
+/* ---------------- composer ---------------- */
+.composer { border-top: 2px solid var(--ink); background: var(--panel); padding: 14px 22px; }
+.composer-row { max-width: 860px; margin: 0 auto; display: flex; gap: 12px; align-items: stretch; }
+.composer textarea {
+  flex: 1;
+  resize: none;
+  border: 2px solid var(--ink);
+  background: #fbf9f2;
+  font: 13.5px/1.5 var(--font-text);
+  padding: 11px 13px;
+  min-height: 52px;
+  max-height: 40vh;
+}
+.composer textarea:focus { outline: 3px solid var(--accent); outline-offset: -1px; }
+.sendcol { display: flex; flex-direction: column; gap: 8px; }
+.btn {
+  font: 600 11px/1 var(--font-mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  border: 2px solid var(--ink);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  padding: 10px 18px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.btn:active { transform: translate(3px, 3px); box-shadow: 0 0 0 var(--ink); }
+.btn:disabled { opacity: .4; cursor: default; }
+.btn:disabled:active { transform: none; box-shadow: var(--shadow-sm); }
+.btn.send { background: var(--accent); }
+.btn.stop { color: var(--err); border-color: var(--err); box-shadow: 3px 3px 0 var(--err); }
+.btn.stop:disabled { box-shadow: 3px 3px 0 var(--err); }
+.hintrow {
+  max-width: 860px;
+  margin: 8px auto 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink-2);
+  flex-wrap: wrap;
+}
+
+/* ---------------- file viewer overlay ---------------- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(23, 22, 15, .45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 4vw;
+  z-index: 40;
+}
+/* The author `display: flex` above outranks the UA `[hidden]` rule, so the
+   attribute alone can't hide the overlay; restore it explicitly. */
+.overlay[hidden] { display: none; }
+.overlay-box {
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  box-shadow: 5px 5px 0 var(--ink);
+  width: min(960px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 2px solid var(--ink);
+  background: var(--panel);
+  overflow-wrap: anywhere;
+}
+.overlay-content {
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  font: 12px/1.55 var(--font-mono);
+  white-space: pre;
+}
+
+@media (max-width: 820px) {
+  body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .rail { flex-direction: row; align-items: center; border-right: 0; border-bottom: 2px solid var(--ink); overflow-x: auto; }
+  .rail-head { border-bottom: 0; border-right: 2px solid var(--ink); padding: 10px 14px; }
+  .newbtn { margin: 10px; white-space: nowrap; }
+  .sessions { display: flex; padding: 0; min-height: 0; }
+  .sess { border-bottom: 0; border-left: 0; border-right: 1px solid var(--hairline); white-space: nowrap; max-width: 220px; }
+  .sess.active { box-shadow: inset 0 -3px 0 var(--accent); }
+  .repo, .railfoot { display: none; }
+  .feed { padding: 14px; }
+  .composer { padding: 10px 14px; }
+}

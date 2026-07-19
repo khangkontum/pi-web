@@ -1,0 +1,274 @@
+package piweb
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+)
+
+// sessionIdleTimeout is how long a pi child with no connected browsers and no
+// running turn is kept alive before being reaped. Session state lives in pi's
+// JSONL files, so reaping loses nothing.
+const sessionIdleTimeout = 30 * time.Minute
+
+// agentState mirrors the fields of pi's get_state response that pi-web needs.
+type agentState struct {
+	Model          json.RawMessage `json:"model"`
+	ThinkingLevel  string          `json:"thinkingLevel"`
+	IsStreaming    bool            `json:"isStreaming"`
+	SessionFile    string          `json:"sessionFile"`
+	SessionID      string          `json:"sessionId"`
+	SessionName    string          `json:"sessionName"`
+	MessageCount   int             `json:"messageCount"`
+	PendingCount   int             `json:"pendingMessageCount"`
+	IsCompacting   bool            `json:"isCompacting"`
+	SteeringMode   string          `json:"steeringMode"`
+	FollowUpMode   string          `json:"followUpMode"`
+	AutoCompaction bool            `json:"autoCompactionEnabled"`
+}
+
+// session is one live pi RPC child plus the browsers subscribed to it.
+type session struct {
+	id   string
+	file string
+
+	mu         sync.Mutex
+	rpc        *rpcClient
+	subs       map[chan []byte]struct{}
+	lastActive time.Time
+	streaming  bool
+}
+
+func (s *session) subscribe() chan []byte {
+	ch := make(chan []byte, 256)
+	s.mu.Lock()
+	s.subs[ch] = struct{}{}
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+	return ch
+}
+
+func (s *session) unsubscribe(ch chan []byte) {
+	s.mu.Lock()
+	if _, ok := s.subs[ch]; ok {
+		delete(s.subs, ch)
+		close(ch)
+	}
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+}
+
+// broadcast fans an event line out to every subscriber. Slow subscribers are
+// dropped rather than allowed to stall the pi read loop.
+func (s *session) broadcast(raw []byte) {
+	var head struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(raw, &head)
+
+	s.mu.Lock()
+	switch head.Type {
+	case "agent_start":
+		s.streaming = true
+	case "agent_settled":
+		s.streaming = false
+	}
+	s.lastActive = time.Now()
+	for ch := range s.subs {
+		select {
+		case ch <- raw:
+		default:
+			delete(s.subs, ch)
+			close(ch)
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *session) touch() {
+	s.mu.Lock()
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *session) idleSince() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idle := len(s.subs) == 0 && !s.streaming
+	return s.lastActive, idle
+}
+
+// supervisor owns the set of live pi children, keyed by pi session id.
+type supervisor struct {
+	cfg Config
+
+	mu       sync.Mutex
+	sessions map[string]*session
+
+	stop chan struct{}
+	wg   sync.WaitGroup
+}
+
+func newSupervisor(cfg Config) *supervisor {
+	sv := &supervisor{
+		cfg:      cfg,
+		sessions: make(map[string]*session),
+		stop:     make(chan struct{}),
+	}
+	sv.wg.Add(1)
+	go sv.reapLoop()
+	return sv
+}
+
+// piCommand assembles the child argv. Project-local files are trusted with
+// --approve: the workspace belongs to the same VM user pi runs as, and a
+// silent default-deny would ignore workspace AGENTS.md and extensions.
+func (sv *supervisor) piCommand(sessionRef string) []string {
+	cmd := append([]string{}, sv.cfg.PiCommand...)
+	cmd = append(cmd, "--mode", "rpc", "--approve")
+	if sv.cfg.SessionDir != "" {
+		cmd = append(cmd, "--session-dir", sv.cfg.SessionDir)
+	}
+	if sessionRef != "" {
+		cmd = append(cmd, "--session", sessionRef)
+	}
+	return cmd
+}
+
+// spawn starts a pi child and resolves its identity via get_state.
+func (sv *supervisor) spawn(ctx context.Context, sessionRef string) (*session, error) {
+	s := &session{
+		subs:       make(map[chan []byte]struct{}),
+		lastActive: time.Now(),
+	}
+	rpc, err := startRPCClient(sv.piCommand(sessionRef), sv.cfg.Workspace, os.Environ(), s.broadcast)
+	if err != nil {
+		return nil, err
+	}
+	s.rpc = rpc
+
+	stateCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	var st agentState
+	if err := rpc.call(stateCtx, map[string]any{"type": "get_state"}, &st); err != nil {
+		rpc.close()
+		return nil, fmt.Errorf("query pi session state: %w", err)
+	}
+	if st.SessionID == "" {
+		rpc.close()
+		return nil, fmt.Errorf("pi reported no session id (is session persistence disabled?)")
+	}
+	s.id = st.SessionID
+	s.file = st.SessionFile
+	s.mu.Lock()
+	s.streaming = st.IsStreaming
+	s.mu.Unlock()
+	return s, nil
+}
+
+// create starts a brand-new session.
+func (sv *supervisor) create(ctx context.Context) (*session, error) {
+	s, err := sv.spawn(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	sv.mu.Lock()
+	sv.sessions[s.id] = s
+	sv.mu.Unlock()
+	return s, nil
+}
+
+// get returns the live session for id, starting a pi child resuming that
+// session if none is running. The id is a pi session UUID; pi resolves it to
+// the stored JSONL file.
+func (sv *supervisor) get(ctx context.Context, id string) (*session, error) {
+	sv.mu.Lock()
+	s, ok := sv.sessions[id]
+	sv.mu.Unlock()
+	if ok && s.rpc.alive() {
+		return s, nil
+	}
+
+	s, err := sv.spawn(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.id != id {
+		s.rpc.close()
+		return nil, fmt.Errorf("pi resolved session %q to %q; refusing mismatched resume", id, s.id)
+	}
+	sv.mu.Lock()
+	if existing, ok := sv.sessions[id]; ok && existing.rpc.alive() {
+		sv.mu.Unlock()
+		s.rpc.close()
+		return existing, nil
+	}
+	sv.sessions[id] = s
+	sv.mu.Unlock()
+	return s, nil
+}
+
+// live reports the session ids with a running pi child.
+func (sv *supervisor) live() map[string]bool {
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+	out := make(map[string]bool, len(sv.sessions))
+	for id, s := range sv.sessions {
+		if s.rpc.alive() {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (sv *supervisor) reapLoop() {
+	defer sv.wg.Done()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-sv.stop:
+			return
+		case <-ticker.C:
+			sv.reapIdle()
+		}
+	}
+}
+
+func (sv *supervisor) reapIdle() {
+	sv.mu.Lock()
+	var victims []*session
+	for id, s := range sv.sessions {
+		if !s.rpc.alive() {
+			delete(sv.sessions, id)
+			continue
+		}
+		if last, idle := s.idleSince(); idle && time.Since(last) > sessionIdleTimeout {
+			victims = append(victims, s)
+			delete(sv.sessions, id)
+		}
+	}
+	sv.mu.Unlock()
+	for _, s := range victims {
+		s.rpc.close()
+	}
+}
+
+// closeAll terminates every child; used on shutdown.
+func (sv *supervisor) closeAll() {
+	close(sv.stop)
+	sv.wg.Wait()
+	sv.mu.Lock()
+	sessions := make([]*session, 0, len(sv.sessions))
+	for id, s := range sv.sessions {
+		sessions = append(sessions, s)
+		delete(sv.sessions, id)
+	}
+	sv.mu.Unlock()
+	for _, s := range sessions {
+		s.rpc.close()
+	}
+}

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<aside class="rail">
+  <div class="rail-head">
+    <div class="brand">PI<span>.</span></div>
+    <div class="vm stamp" id="workspace-label"></div>
+  </div>
+  <button class="newbtn" id="new-session">+ New session</button>
+  <nav class="sessions" id="session-list"></nav>
+  <div class="repo" id="repo-panel" hidden>
+    <div class="repo-head stamp">
+      <span class="branch" id="repo-branch"></span>
+      <span class="dirty" id="repo-dirty"></span>
+    </div>
+    <pre class="gitgraph" id="repo-graph"></pre>
+  </div>
+  <div class="railfoot stamp" id="stats-panel">
+    <div class="kv"><span class="k">model</span><span class="v" id="stat-model">—</span></div>
+    <div class="kv"><span class="k">tokens</span><span class="v" id="stat-tokens">—</span></div>
+    <div class="kv"><span class="k">context</span><span class="v" id="stat-context">—</span></div>
+    <div class="kv"><span class="k">link</span><span class="v" id="stat-link">idle</span></div>
+  </div>
+</aside>
+
+<main class="main">
+  <header class="tophead">
+    <h1 id="session-title">pi</h1>
+    <span class="chip stamp hot" id="working-chip" hidden>agent working</span>
+    <span class="chip stamp" id="session-chip" hidden></span>
+  </header>
+
+  <section class="feed" id="feed">
+    <div class="empty" id="empty-state">
+      <div class="empty-title">No session selected</div>
+      <div class="empty-sub">Start a new session, or pick one from the rail. Sessions are shared with the <code>pi</code> CLI in the terminal.</div>
+    </div>
+  </section>
+
+  <footer class="composer">
+    <div class="composer-row">
+      <textarea id="input" placeholder="Message pi — start with ! to run a shell command" rows="2"></textarea>
+      <div class="sendcol">
+        <button class="btn send" id="send">Send</button>
+        <button class="btn stop" id="stop" disabled>Stop</button>
+      </div>
+    </div>
+    <div class="hintrow stamp">
+      <span>enter to send · shift+enter newline · <b>!</b> runs in shell (pi sees it)</span>
+      <span>same sessions as `pi` in the terminal</span>
+    </div>
+  </footer>
+</main>
+
+<div class="overlay" id="file-overlay" hidden>
+  <div class="overlay-box">
+    <div class="overlay-head stamp">
+      <span id="file-path"></span>
+      <button class="btn" id="file-close">Close</button>
+    </div>
+    <pre class="overlay-content" id="file-content"></pre>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
