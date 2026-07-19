@@ -23,8 +23,10 @@ import (
 	"time"
 )
 
-// Version identifies the pi-web build; it is reported by /version.
-const Version = "0.1.0"
+// Version identifies the pi-web build; it is reported by /version and by
+// --version. Release builds override it via
+// -ldflags "-X github.com/khangkontum/pi-web/internal/piweb.Version=v1.2.3".
+var Version = "dev"
 
 // DefaultAddr is the default loopback listen address.
 const DefaultAddr = "127.0.0.1:9999"

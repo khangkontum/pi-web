@@ -10,6 +10,15 @@ session directory, so anything you start in the browser can be picked up from
 
 ## Install
 
+Prebuilt binaries for Linux and macOS (amd64/arm64) are on the
+[releases page](https://github.com/khangkontum/pi-web/releases):
+
+```bash
+curl -Lo pi-web "https://github.com/khangkontum/pi-web/releases/latest/download/pi-web_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" && chmod +x pi-web
+```
+
+Or with Go:
+
 ```bash
 go install github.com/khangkontum/pi-web/cmd/pi-web@latest
 ```
@@ -73,6 +82,20 @@ compatibility.
 | `POST /api/sessions/{id}/bash` | Run a shell command in the workspace |
 | `GET /api/git` | Workspace git summary |
 | `GET /api/file` | Read a workspace file |
+
+## Releases
+
+Tagging `vX.Y.Z` publishes a GitHub release with per-platform binaries,
+`checksums.txt`, and `release.json`. The latest release metadata is always at
+the stable URL:
+
+```
+https://github.com/khangkontum/pi-web/releases/latest/download/release.json
+```
+
+`release.json` carries `{version, commit, published_at, protocol,
+checksums_url, download_urls}` — everything a client needs to check for and
+verify an update without touching the GitHub API.
 
 ## Development
 

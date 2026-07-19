@@ -71,6 +71,20 @@ The browser-facing API is a public contract:
 - When changing generated responses or SSE framing, add or update a test
   that asserts the exact wire shape.
 
+## Releases
+
+- CI (`.github/workflows/ci.yml`) runs gofmt/vet/build/test on pushes and
+  PRs.
+- Tagging `vX.Y.Z` triggers `.github/workflows/release.yml`: cross-compiled
+  binaries (linux/darwin × amd64/arm64, CGO off), `checksums.txt`, and
+  `release.json`, published as GitHub release assets.
+- `Version` in `internal/piweb/piweb.go` is a var stamped at release time
+  via `-ldflags -X`; dev builds report `dev`. Do not hand-edit it per
+  release — the tag is the version.
+- `release.json` is the update-check contract (stable URL:
+  `releases/latest/download/release.json`). If you change its shape, treat
+  it like an API change: additive when possible, and update the README.
+
 ## Style
 
 - Go-style simplicity: explicit control flow, small composed pieces, no

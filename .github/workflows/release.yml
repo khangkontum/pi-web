@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: test
+        run: go test ./...
+
+      - name: build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS=${platform%/*} GOARCH=${platform#*/} CGO_ENABLED=0 \
+              go build -trimpath \
+                -ldflags "-s -w -X github.com/khangkontum/pi-web/internal/piweb.Version=${VERSION}" \
+                -o "dist/pi-web_${platform%/*}_${platform#*/}" ./cmd/pi-web
+          done
+
+      - name: checksums
+        run: cd dist && sha256sum pi-web_* > checksums.txt
+
+      # release.json is a release asset, so the latest metadata is always at
+      # the stable URL:
+      #   https://github.com/<repo>/releases/latest/download/release.json
+      # Clients (self-updaters, caches) poll that instead of the API.
+      - name: release metadata
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          protocol=$(go run ./cmd/pi-web --version | sed -n 's/.*protocol \([0-9]*\).*/\1/p')
+          test -n "$protocol"
+          base="https://github.com/${REPO}/releases/download/${TAG}"
+          jq -n \
+            --arg version "$TAG" \
+            --arg commit "$GITHUB_SHA" \
+            --arg published_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson protocol "$protocol" \
+            --arg base "$base" \
+            '{
+              version: $version,
+              commit: $commit,
+              published_at: $published_at,
+              protocol: $protocol,
+              checksums_url: ($base + "/checksums.txt"),
+              download_urls: {
+                linux_amd64:  ($base + "/pi-web_linux_amd64"),
+                linux_arm64:  ($base + "/pi-web_linux_arm64"),
+                darwin_amd64: ($base + "/pi-web_darwin_amd64"),
+                darwin_arm64: ($base + "/pi-web_darwin_arm64")
+              }
+            }' > dist/release.json
+          cat dist/release.json
+
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
