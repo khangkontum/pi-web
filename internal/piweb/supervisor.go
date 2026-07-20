@@ -41,6 +41,9 @@ type session struct {
 	subs       map[chan []byte]struct{}
 	lastActive time.Time
 	streaming  bool
+	// recycleWhenSettled marks a mid-turn child to be closed once its turn
+	// settles, so it respawns on a freshly upgraded pi.
+	recycleWhenSettled bool
 }
 
 func (s *session) subscribe() chan []byte {
@@ -70,12 +73,19 @@ func (s *session) broadcast(raw []byte) {
 	}
 	_ = json.Unmarshal(raw, &head)
 
+	var recycle bool
 	s.mu.Lock()
 	switch head.Type {
-	case "agent_start":
+	case "agent_start", "turn_start":
 		s.streaming = true
-	case "agent_settled":
+	// agent_settled is the primary settle signal; agent_end and turn_end are
+	// accepted as cheap skew insurance against pi renaming the event.
+	case "agent_settled", "agent_end", "turn_end":
 		s.streaming = false
+		if s.recycleWhenSettled {
+			s.recycleWhenSettled = false
+			recycle = true
+		}
 	}
 	s.lastActive = time.Now()
 	for ch := range s.subs {
@@ -86,7 +96,16 @@ func (s *session) broadcast(raw []byte) {
 			close(ch)
 		}
 	}
+	rpc := s.rpc
 	s.mu.Unlock()
+
+	// Close after releasing the lock and after subscribers have seen the
+	// settle event: their SSE streams drop, the browser reconnects, and the
+	// supervisor respawns the session on the upgraded pi. Closing runs off the
+	// read-loop goroutine (broadcast is called on it) to avoid deadlock.
+	if recycle && rpc != nil {
+		go rpc.close()
+	}
 }
 
 func (s *session) touch() {
@@ -102,9 +121,17 @@ func (s *session) idleSince() (time.Time, bool) {
 	return s.lastActive, idle
 }
 
+// flagSupporter reports whether the installed pi accepts a given CLI flag.
+// piManager implements it; supervisor depends on this seam, not the concrete
+// type, so it can spawn pi without an optional flag the installed pi lacks.
+type flagSupporter interface {
+	supportsFlag(flag string) bool
+}
+
 // supervisor owns the set of live pi children, keyed by pi session id.
 type supervisor struct {
 	cfg Config
+	pi  flagSupporter
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -126,10 +153,15 @@ func newSupervisor(cfg Config) *supervisor {
 
 // piCommand assembles the child argv. Project-local files are trusted with
 // --approve: the workspace belongs to the same VM user pi runs as, and a
-// silent default-deny would ignore workspace AGENTS.md and extensions.
+// silent default-deny would ignore workspace AGENTS.md and extensions. When
+// the installed pi is too old to know --approve, it is omitted rather than
+// passed and rejected — version skew degrades, it never takes a session down.
 func (sv *supervisor) piCommand(sessionRef string) []string {
 	cmd := append([]string{}, sv.cfg.PiCommand...)
-	cmd = append(cmd, "--mode", "rpc", "--approve")
+	cmd = append(cmd, "--mode", "rpc")
+	if sv.pi == nil || sv.pi.supportsFlag("approve") {
+		cmd = append(cmd, "--approve")
+	}
 	if sv.cfg.SessionDir != "" {
 		cmd = append(cmd, "--session-dir", sv.cfg.SessionDir)
 	}
@@ -277,6 +309,33 @@ func (sv *supervisor) reapIdle() {
 			victims = append(victims, s)
 			delete(sv.sessions, id)
 		}
+	}
+	sv.mu.Unlock()
+	for _, s := range victims {
+		s.rpc.close()
+	}
+}
+
+// recycleIdle closes every child that is not mid-turn so it respawns on a
+// freshly upgraded pi; children mid-turn are flagged to recycle when their
+// turn settles. Called after a successful pi upgrade.
+func (sv *supervisor) recycleIdle() {
+	sv.mu.Lock()
+	var victims []*session
+	for id, s := range sv.sessions {
+		if !s.rpc.alive() {
+			delete(sv.sessions, id)
+			continue
+		}
+		s.mu.Lock()
+		if s.streaming {
+			s.recycleWhenSettled = true
+			s.mu.Unlock()
+			continue
+		}
+		s.mu.Unlock()
+		victims = append(victims, s)
+		delete(sv.sessions, id)
 	}
 	sv.mu.Unlock()
 	for _, s := range victims {

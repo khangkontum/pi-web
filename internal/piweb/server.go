@@ -16,8 +16,21 @@ import (
 	"time"
 )
 
-//go:embed ui
+//go:embed all:ui/dist
 var uiFS embed.FS
+
+// uiNotBuilt is served when the embedded UI has no index.html — i.e. the Go
+// binary was built without first building web/ into ui/dist. The Go binary is
+// still the whole product; it must run, not panic, in that state.
+const uiNotBuilt = `<!doctype html>
+<meta charset="utf-8">
+<title>pi-web — UI not built</title>
+<body style="font:16px system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">
+<h1>UI not built</h1>
+<p>This binary was compiled without the web UI. Run <code>mise run build</code>
+(or build <code>web/</code> into <code>internal/piweb/ui/dist</code>) and rebuild.</p>
+<p>The JSON API under <code>/api</code> and <code>/version</code> still works.</p>
+</body>`
 
 // thinkingLevels are the reasoning-effort settings pi accepts, in order.
 var thinkingLevels = []string{"off", "minimal", "low", "medium", "high", "xhigh"}
@@ -26,6 +39,7 @@ type server struct {
 	cfg Config
 	sv  *supervisor
 	upd *updater
+	pi  *piManager
 	mux *http.ServeMux
 
 	modelsMu    sync.Mutex
@@ -33,14 +47,10 @@ type server struct {
 	modelsAt    time.Time
 }
 
-func newServer(cfg Config, sv *supervisor, upd *updater) *server {
-	s := &server{cfg: cfg, sv: sv, upd: upd, mux: http.NewServeMux()}
+func newServer(cfg Config, sv *supervisor, upd *updater, pi *piManager) *server {
+	s := &server{cfg: cfg, sv: sv, upd: upd, pi: pi, mux: http.NewServeMux()}
 
-	ui, err := fs.Sub(uiFS, "ui")
-	if err != nil {
-		panic("piweb: embedded ui missing: " + err.Error())
-	}
-	s.mux.Handle("GET /", http.FileServerFS(ui))
+	s.mux.Handle("GET /", uiHandler())
 
 	s.mux.HandleFunc("GET /version", s.handleVersion)
 	s.mux.HandleFunc("GET /api/sessions", s.handleListSessions)
@@ -51,19 +61,54 @@ func newServer(cfg Config, sv *supervisor, upd *updater) *server {
 	s.mux.HandleFunc("POST /api/sessions/{id}/bash", s.handleBash)
 	s.mux.HandleFunc("POST /api/sessions/{id}/model", s.handleSetModel)
 	s.mux.HandleFunc("POST /api/sessions/{id}/thinking", s.handleSetThinking)
+	s.mux.HandleFunc("GET /api/sessions/{id}/fork-messages", s.handleForkMessages)
+	s.mux.HandleFunc("POST /api/sessions/{id}/fork", s.handleFork)
+	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.handleCompact)
+	s.mux.HandleFunc("POST /api/sessions/{id}/compaction-auto", s.handleCompactionAuto)
+	s.mux.HandleFunc("POST /api/sessions/{id}/retry-abort", s.handleRetryAbort)
+	s.mux.HandleFunc("POST /api/sessions/{id}/steering", s.handleSteering)
+	s.mux.HandleFunc("POST /api/sessions/{id}/follow-up", s.handleFollowUp)
 	s.mux.HandleFunc("GET /api/models", s.handleModels)
 	s.mux.HandleFunc("GET /api/dirs", s.handleDirs)
+	s.mux.HandleFunc("GET /api/tree", s.handleTree)
+	s.mux.HandleFunc("GET /api/files", s.handleFiles)
 	s.mux.HandleFunc("GET /api/git", s.handleGit)
 	s.mux.HandleFunc("GET /api/file", s.handleFile)
+	s.mux.HandleFunc("GET /api/raw", s.handleRaw)
 	s.mux.HandleFunc("GET /api/update", s.handleUpdateStatus)
 	s.mux.HandleFunc("POST /api/update/check", s.handleUpdateCheck)
 	s.mux.HandleFunc("POST /api/update/apply", s.handleUpdateApply)
 	s.mux.HandleFunc("POST /api/update/auto", s.handleUpdateAuto)
+	s.mux.HandleFunc("GET /api/pi", s.handlePiStatus)
+	s.mux.HandleFunc("POST /api/pi/check", s.handlePiCheck)
+	s.mux.HandleFunc("POST /api/pi/update", s.handlePiUpdate)
+	s.mux.HandleFunc("POST /api/pi/auto", s.handlePiAuto)
 	return s
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// uiHandler serves the embedded SPA, falling back to the "UI not built" page
+// when the dist FS holds only its placeholder (no index.html).
+func uiHandler() http.Handler {
+	dist, err := fs.Sub(uiFS, "ui/dist")
+	if err != nil {
+		panic("piweb: embedded ui/dist missing: " + err.Error())
+	}
+	return uiHandlerFS(dist)
+}
+
+func uiHandlerFS(dist fs.FS) http.Handler {
+	if _, err := fs.Stat(dist, "index.html"); err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(uiNotBuilt))
+		})
+	}
+	return http.FileServerFS(dist)
 }
 
 func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +178,7 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Message != "" {
-		if err := s.sendPrompt(ctx, sess, req.Message); err != nil {
+		if err := s.sendPrompt(ctx, sess, req.Message, nil); err != nil {
 			httpError(w, http.StatusBadGateway, err)
 			return
 		}
@@ -219,24 +264,32 @@ func (s *server) snapshot(ctx context.Context, sess *session) ([]byte, error) {
 	})
 }
 
+// promptImage is one attached image in a message, forwarded to pi's prompt
+// command as an ImageContent block.
+type promptImage struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
+}
+
 func (s *server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.session(w, r)
 	if !ok {
 		return
 	}
 	var req struct {
-		Message string `json:"message"`
+		Message string        `json:"message"`
+		Images  []promptImage `json:"images"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Message == "" {
+	if req.Message == "" && len(req.Images) == 0 {
 		httpError(w, http.StatusBadRequest, fmt.Errorf("empty message"))
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
 	defer cancel()
-	if err := s.sendPrompt(ctx, sess, req.Message); err != nil {
+	if err := s.sendPrompt(ctx, sess, req.Message, req.Images); err != nil {
 		httpError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -244,14 +297,26 @@ func (s *server) handleMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendPrompt delivers a prompt, steering it into the queue when the agent is
-// mid-stream instead of failing.
-func (s *server) sendPrompt(ctx context.Context, sess *session, message string) error {
+// mid-stream instead of failing. Images are forwarded as pi ImageContent
+// blocks.
+func (s *server) sendPrompt(ctx context.Context, sess *session, message string, images []promptImage) error {
 	sess.touch()
 	var st agentState
 	if err := sess.rpc.call(ctx, map[string]any{"type": "get_state"}, &st); err != nil {
 		return err
 	}
 	cmd := map[string]any{"type": "prompt", "message": message}
+	if len(images) > 0 {
+		blocks := make([]map[string]any, 0, len(images))
+		for _, img := range images {
+			blocks = append(blocks, map[string]any{
+				"type":     "image",
+				"data":     img.Data,
+				"mimeType": img.MimeType,
+			})
+		}
+		cmd["images"] = blocks
+	}
 	if st.IsStreaming {
 		cmd["streamingBehavior"] = "steer"
 	}
@@ -325,6 +390,53 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// handleFiles returns a flat, base-relative file index for a client-side fuzzy
+// finder. It prefers `git ls-files` and falls back to a bounded walk; truncated
+// reports whether the cap was hit.
+func (s *server) handleFiles(w http.ResponseWriter, r *http.Request) {
+	files, truncated, err := listFiles(r.Context(), s.base(r))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": files, "truncated": truncated})
+}
+
+// handleTree lists the immediate children (dirs and files) of ?path= for the
+// file explorer, defaulting to the workspace.
+func (s *server) handleTree(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" {
+		path = s.cfg.Workspace
+	}
+	path = filepath.Clean(path)
+	entries, err := readTree(path)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		parent = ""
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "parent": parent, "entries": entries})
+}
+
+// handleRaw serves a file's raw bytes with a detected content type, for images,
+// PDFs, and audio the file viewer cannot render as text. Relative paths resolve
+// against ?base=.
+func (s *server) handleRaw(w http.ResponseWriter, r *http.Request) {
+	raw, err := readRawFile(s.base(r), r.URL.Query().Get("path"))
+	if err != nil {
+		httpError(w, http.StatusNotFound, err)
+		return
+	}
+	w.Header().Set("Content-Type", raw.ContentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw.Data)
 }
 
 // base returns the directory a git/file request resolves against: the active
@@ -425,6 +537,150 @@ func (s *server) handleSetThinking(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"level": req.Level})
 }
 
+// handleForkMessages lists the user messages available to fork from, via pi's
+// get_fork_messages command.
+func (s *server) handleForkMessages(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	defer cancel()
+	var data json.RawMessage
+	if err := sess.rpc.call(ctx, map[string]any{"type": "get_fork_messages"}, &data); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// handleFork forks the session at entryId via pi's fork command, then
+// broadcasts a piweb_fork event so other connected browsers refresh.
+func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		EntryID string `json:"entryId"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.EntryID == "" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("entryId is required"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	defer cancel()
+	sess.touch()
+	var data json.RawMessage
+	if err := sess.rpc.call(ctx, map[string]any{"type": "fork", "entryId": req.EntryID}, &data); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	if event, err := json.Marshal(map[string]any{"type": "piweb_fork", "entryId": req.EntryID}); err == nil {
+		sess.broadcast(event)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": data})
+}
+
+// handleCompact manually compacts the session context via pi's compact command.
+func (s *server) handleCompact(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+	defer cancel()
+	sess.touch()
+	var data json.RawMessage
+	if err := sess.rpc.call(ctx, map[string]any{"type": "compact"}, &data); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": data})
+}
+
+// handleCompactionAuto toggles pi's automatic compaction.
+func (s *server) handleCompactionAuto(w http.ResponseWriter, r *http.Request) {
+	s.setEnabled(w, r, "set_auto_compaction")
+}
+
+// handleRetryAbort cancels an in-progress auto-retry via pi's abort_retry.
+func (s *server) handleRetryAbort(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	defer cancel()
+	if err := sess.rpc.call(ctx, map[string]any{"type": "abort_retry"}, nil); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleSteering sets how steering messages are delivered (set_steering_mode).
+func (s *server) handleSteering(w http.ResponseWriter, r *http.Request) {
+	s.setMode(w, r, "set_steering_mode")
+}
+
+// handleFollowUp sets how follow-up messages are delivered (set_follow_up_mode).
+func (s *server) handleFollowUp(w http.ResponseWriter, r *http.Request) {
+	s.setMode(w, r, "set_follow_up_mode")
+}
+
+// setEnabled is the shared body for commands taking a single {enabled} bool.
+func (s *server) setEnabled(w http.ResponseWriter, r *http.Request, command string) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	defer cancel()
+	if err := sess.rpc.call(ctx, map[string]any{"type": command, "enabled": req.Enabled}, nil); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": req.Enabled})
+}
+
+// setMode is the shared body for commands taking a single {mode} string, valid
+// values "all" or "one-at-a-time".
+func (s *server) setMode(w http.ResponseWriter, r *http.Request, command string) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Mode != "all" && req.Mode != "one-at-a-time" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("mode must be \"all\" or \"one-at-a-time\""))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	defer cancel()
+	if err := sess.rpc.call(ctx, map[string]any{"type": command, "mode": req.Mode}, nil); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mode": req.Mode})
+}
+
 // handleDirs lists immediate subdirectories of a path for the new-session
 // folder picker. Under the loopback trust model any readable path is allowed.
 func (s *server) handleDirs(w http.ResponseWriter, r *http.Request) {
@@ -508,6 +764,48 @@ func (s *server) handleUpdateAuto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.upd.status())
+}
+
+// handlePiStatus returns the installed-pi version state that drives the UI's
+// version-skew banner.
+func (s *server) handlePiStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.pi.status())
+}
+
+func (s *server) handlePiCheck(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 1*time.Minute)
+	defer cancel()
+	if _, err := s.pi.check(ctx); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.pi.status())
+}
+
+// handlePiUpdate upgrades pi via its own installer, re-probes flags, and
+// recycles idle children onto the new binary.
+func (s *server) handlePiUpdate(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 6*time.Minute)
+	defer cancel()
+	if err := s.pi.applyUpgrade(ctx); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.pi.status())
+}
+
+func (s *server) handlePiAuto(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.pi.setAuto(req.Enabled); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.pi.status())
 }
 
 func validThinking(level string) bool {

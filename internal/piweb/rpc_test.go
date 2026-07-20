@@ -65,14 +65,18 @@ func TestHelperPiRPC(t *testing.T) {
 	scanner.Buffer(make([]byte, 64<<10), 8<<20)
 	for scanner.Scan() {
 		var cmd struct {
-			Type     string `json:"type"`
-			ID       string `json:"id"`
-			Message  string `json:"message"`
-			Command  string `json:"command"`
-			Name     string `json:"name"`
-			Provider string `json:"provider"`
-			ModelID  string `json:"modelId"`
-			Level    string `json:"level"`
+			Type     string          `json:"type"`
+			ID       string          `json:"id"`
+			Message  string          `json:"message"`
+			Command  string          `json:"command"`
+			Name     string          `json:"name"`
+			Provider string          `json:"provider"`
+			ModelID  string          `json:"modelId"`
+			Level    string          `json:"level"`
+			EntryID  string          `json:"entryId"`
+			Mode     string          `json:"mode"`
+			Enabled  bool            `json:"enabled"`
+			Images   json.RawMessage `json:"images"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &cmd); err != nil {
 			continue
@@ -106,14 +110,36 @@ func TestHelperPiRPC(t *testing.T) {
 		case "prompt":
 			respond(cmd.ID, "prompt", nil)
 			emit(map[string]any{"type": "agent_start"})
+			echo := "echo: " + cmd.Message
+			if len(cmd.Images) > 0 {
+				echo += " [+images]"
+			}
 			emit(map[string]any{
 				"type":    "message_update",
-				"message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "echo: " + cmd.Message}}},
+				"message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": echo}}},
 				"assistantMessageEvent": map[string]any{
-					"type": "text_delta", "contentIndex": 0, "delta": "echo: " + cmd.Message,
+					"type": "text_delta", "contentIndex": 0, "delta": echo,
 				},
 			})
 			emit(map[string]any{"type": "agent_settled"})
+		case "get_fork_messages":
+			respond(cmd.ID, "get_fork_messages", map[string]any{
+				"messages": []any{
+					map[string]any{"entryId": "e1", "text": "first prompt"},
+				},
+			})
+		case "fork":
+			respond(cmd.ID, "fork", map[string]any{"text": "first prompt", "cancelled": false})
+		case "compact":
+			respond(cmd.ID, "compact", map[string]any{"summary": "compacted", "tokensBefore": 100, "estimatedTokensAfter": 20})
+		case "set_auto_compaction":
+			respond(cmd.ID, "set_auto_compaction", nil)
+		case "abort_retry":
+			respond(cmd.ID, "abort_retry", nil)
+		case "set_steering_mode":
+			respond(cmd.ID, "set_steering_mode", nil)
+		case "set_follow_up_mode":
+			respond(cmd.ID, "set_follow_up_mode", nil)
 		case "bash":
 			respond(cmd.ID, "bash", map[string]any{
 				"output": "ran: " + cmd.Command, "exitCode": 0, "cancelled": false, "truncated": false,

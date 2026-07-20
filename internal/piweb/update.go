@@ -213,9 +213,13 @@ func (u *updater) status() map[string]any {
 }
 
 // setAuto flips auto-apply and persists the choice so it survives restarts.
+// It preserves the other persisted toggles (e.g. AutoUpdatePi) rather than
+// overwriting the whole file.
 func (u *updater) setAuto(enabled bool) error {
 	u.auto.Store(enabled)
-	return saveSettings(u.settingsPath, settings{AutoUpdate: enabled})
+	s, _ := loadSettings(u.settingsPath)
+	s.AutoUpdate = enabled
+	return saveSettings(u.settingsPath, s)
 }
 
 func (u *updater) fetchRelease(ctx context.Context) (releaseInfo, error) {

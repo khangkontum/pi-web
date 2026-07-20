@@ -10,10 +10,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10" # keep in sync with mise.toml
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false # zero deps — no go.sum to key a cache on
+      # Build the real UI before the Go steps so the embedded ui/dist is not
+      # just the placeholder.
+      - name: web install
+        run: bun install --frozen-lockfile
+        working-directory: web
+      - name: web test
+        run: bun run test
+        working-directory: web
+      - name: web build
+        run: bun run build
+        working-directory: web
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: vet

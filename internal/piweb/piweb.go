@@ -123,9 +123,20 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		go upd.run(ctx)
 	}
 
+	// piManager keeps the installed pi current and tells the supervisor which
+	// optional flags pi supports. Link the two, probe once at boot, then run
+	// the background version check.
+	pi := newPiManager(cfg, logw)
+	sv.pi = pi
+	pi.recycle = sv.recycleIdle
+	pi.bootProbe(ctx)
+	if cfg.UpdateInterval > 0 {
+		go pi.run(ctx)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           newServer(cfg, sv, upd),
+		Handler:           newServer(cfg, sv, upd, pi),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

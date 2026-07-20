@@ -44,14 +44,19 @@ for the HTTP API, self-update, deployment, and release details.
 
 ## Development
 
+The UI is a Vite + Svelte 5 app in `web/`, built into
+`internal/piweb/ui/dist` and embedded with `go:embed`. Build the whole product
+with [mise](https://mise.jdx.dev):
+
 ```bash
-go build ./...
-go test ./...
+mise run build   # bun install + vite build + go build
+mise run dev      # Vite dev server (hot reload), proxying /api to a Go server
+mise run test     # go test ./... + vitest
 ```
 
-The UI is plain HTML/CSS/JS embedded with `go:embed` — there is no build
-step. Tool versions are pinned in `mise.toml` for [mise](https://mise.jdx.dev)
-users; a plain Go toolchain works the same.
+`go build ./...` on its own still compiles and runs without ever building the
+UI — it then serves a plain "UI not built" page. Tool versions (Go, bun) are
+pinned in `mise.toml`.
 
 ## License
 

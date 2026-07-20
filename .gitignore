@@ -1,2 +1,9 @@
 /pi-web
-dist/
+/dist/
+
+# web build
+/web/node_modules/
+
+# embedded UI build output — only the placeholder is committed
+/internal/piweb/ui/dist/*
+!/internal/piweb/ui/dist/.gitkeep

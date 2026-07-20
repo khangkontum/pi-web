@@ -1,2 +1,23 @@
 [tools]
 go = "1.26.2"
+bun = "1.3.10"
+
+[tasks.build]
+description = "Build the web UI and the Go binary (full product)"
+dir = "{{ config_root }}"
+run = ["bun install --cwd web", "bun run --cwd web build", "go build ./..."]
+
+[tasks.dev]
+description = "Run the Go server (:9999) and the Vite dev server (hot reload) together"
+dir = "{{ config_root }}"
+run = """
+go run ./cmd/pi-web &
+GO_PID=$!
+trap 'kill $GO_PID 2>/dev/null' EXIT INT TERM
+bun run --cwd web dev
+"""
+
+[tasks.test]
+description = "Run Go and web unit tests"
+dir = "{{ config_root }}"
+run = ["go test ./...", "bun run --cwd web test"]

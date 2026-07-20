@@ -3,8 +3,10 @@ package piweb
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,9 +21,27 @@ func newTestServer(t *testing.T) (*httptest.Server, Config) {
 	cfg := helperConfig(t)
 	sv := newSupervisor(cfg)
 	t.Cleanup(sv.closeAll)
-	ts := httptest.NewServer(newServer(cfg, sv, newUpdater(cfg, testWriter{t})))
+	pi := newTestPiManager(t, cfg, sv)
+	ts := httptest.NewServer(newServer(cfg, sv, newUpdater(cfg, testWriter{t}), pi))
 	t.Cleanup(ts.Close)
 	return ts, cfg
+}
+
+// newTestPiManager builds a piManager with fake collaborators (no pi binary,
+// no network) reporting a probed pi that supports --approve, wired to recycle
+// the supervisor's children.
+func newTestPiManager(t *testing.T, cfg Config, sv *supervisor) *piManager {
+	t.Helper()
+	pi := newPiManager(cfg, testWriter{t})
+	pi.probe = func(context.Context) (string, map[string]bool, error) {
+		return "0.80.1", map[string]bool{"approve": true, "mode": true}, nil
+	}
+	pi.registry = func(context.Context) (string, error) { return "0.80.1", nil }
+	pi.upgrade = func(context.Context) error { return nil }
+	pi.recycle = sv.recycleIdle
+	sv.pi = pi
+	pi.bootProbe(context.Background())
+	return pi
 }
 
 func postJSON(t *testing.T, url string, body any) *http.Response {
@@ -368,6 +388,297 @@ func TestUpdateStatusAndAuto(t *testing.T) {
 		t.Fatalf("apply on dev build: status %d, want 400", applyResp.StatusCode)
 	}
 	applyResp.Body.Close()
+}
+
+func TestMessageWithImages(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp := postJSON(t, ts.URL+"/api/sessions", map[string]any{})
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeBody(t, resp, &created)
+
+	stream, err := http.Get(ts.URL + "/api/sessions/" + created.ID + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+
+	msgResp := postJSON(t, ts.URL+"/api/sessions/"+created.ID+"/message", map[string]any{
+		"message": "look",
+		"images":  []map[string]any{{"data": "aGVsbG8=", "mimeType": "image/png"}},
+	})
+	if msgResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("message with images: status %d", msgResp.StatusCode)
+	}
+	msgResp.Body.Close()
+
+	// The stub appends "[+images]" to its echo when images are present.
+	var sawImageEcho bool
+	for _, ev := range readSSE(t, stream, 4, 10*time.Second) {
+		if ev.name == "pi" && strings.Contains(ev.data, "[+images]") {
+			sawImageEcho = true
+		}
+	}
+	if !sawImageEcho {
+		t.Error("images were not forwarded to the prompt command")
+	}
+}
+
+func TestForkMessagesAndFork(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp := postJSON(t, ts.URL+"/api/sessions", map[string]any{})
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeBody(t, resp, &created)
+
+	fmResp, err := http.Get(ts.URL + "/api/sessions/" + created.ID + "/fork-messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fm struct {
+		Messages []struct {
+			EntryID string `json:"entryId"`
+			Text    string `json:"text"`
+		} `json:"messages"`
+	}
+	decodeBody(t, fmResp, &fm)
+	if len(fm.Messages) != 1 || fm.Messages[0].EntryID != "e1" {
+		t.Fatalf("unexpected fork messages: %+v", fm.Messages)
+	}
+
+	// Subscribe, then fork, and confirm a piweb_fork broadcast.
+	stream, err := http.Get(ts.URL + "/api/sessions/" + created.ID + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+
+	forkResp := postJSON(t, ts.URL+"/api/sessions/"+created.ID+"/fork", map[string]any{"entryId": "e1"})
+	if forkResp.StatusCode != http.StatusOK {
+		t.Fatalf("fork: status %d", forkResp.StatusCode)
+	}
+	forkResp.Body.Close()
+
+	var sawFork bool
+	for _, ev := range readSSE(t, stream, 3, 10*time.Second) {
+		if ev.name == "pi" && strings.Contains(ev.data, "piweb_fork") {
+			sawFork = true
+		}
+	}
+	if !sawFork {
+		t.Error("expected a piweb_fork broadcast after forking")
+	}
+
+	// Missing entryId is a 400.
+	bad := postJSON(t, ts.URL+"/api/sessions/"+created.ID+"/fork", map[string]any{})
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty fork: status %d, want 400", bad.StatusCode)
+	}
+	bad.Body.Close()
+}
+
+func TestCompactAndModeEndpoints(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp := postJSON(t, ts.URL+"/api/sessions", map[string]any{})
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeBody(t, resp, &created)
+	base := ts.URL + "/api/sessions/" + created.ID
+
+	compactResp := postJSON(t, base+"/compact", map[string]any{})
+	if compactResp.StatusCode != http.StatusOK {
+		t.Fatalf("compact: status %d", compactResp.StatusCode)
+	}
+	compactResp.Body.Close()
+
+	for _, ep := range []string{"/compaction-auto"} {
+		r := postJSON(t, base+ep, map[string]any{"enabled": true})
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d", ep, r.StatusCode)
+		}
+		r.Body.Close()
+	}
+
+	retryResp := postJSON(t, base+"/retry-abort", map[string]any{})
+	if retryResp.StatusCode != http.StatusOK {
+		t.Fatalf("retry-abort: status %d", retryResp.StatusCode)
+	}
+	retryResp.Body.Close()
+
+	for _, ep := range []string{"/steering", "/follow-up"} {
+		ok := postJSON(t, base+ep, map[string]any{"mode": "all"})
+		if ok.StatusCode != http.StatusOK {
+			t.Fatalf("%s valid mode: status %d", ep, ok.StatusCode)
+		}
+		ok.Body.Close()
+		bad := postJSON(t, base+ep, map[string]any{"mode": "bogus"})
+		if bad.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s bad mode: status %d, want 400", ep, bad.StatusCode)
+		}
+		bad.Body.Close()
+	}
+}
+
+func TestFilesEndpoint(t *testing.T) {
+	ts, cfg := newTestServer(t)
+	// A non-git workspace exercises the WalkDir fallback.
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "sub", "b.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, "node_modules", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "node_modules", "pkg", "c.txt"), []byte("z"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/api/files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Files     []string `json:"files"`
+		Truncated bool     `json:"truncated"`
+	}
+	decodeBody(t, resp, &out)
+	got := map[string]bool{}
+	for _, f := range out.Files {
+		got[f] = true
+	}
+	if !got["a.txt"] || !got[filepath.Join("sub", "b.txt")] {
+		t.Fatalf("expected a.txt and sub/b.txt, got %v", out.Files)
+	}
+	if got[filepath.Join("node_modules", "pkg", "c.txt")] {
+		t.Errorf("node_modules should be skipped, got %v", out.Files)
+	}
+}
+
+func TestTreeEndpoint(t *testing.T) {
+	ts, cfg := newTestServer(t)
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, "zdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "afile.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(ts.URL + "/api/tree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Path    string      `json:"path"`
+		Entries []treeEntry `json:"entries"`
+	}
+	decodeBody(t, resp, &out)
+	if len(out.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %+v", out.Entries)
+	}
+	// Directories are listed before files.
+	if !out.Entries[0].Dir || out.Entries[0].Name != "zdir" {
+		t.Errorf("dirs should come first: %+v", out.Entries)
+	}
+	if out.Entries[1].Dir || out.Entries[1].Name != "afile.txt" {
+		t.Errorf("unexpected second entry: %+v", out.Entries[1])
+	}
+}
+
+func TestRawEndpoint(t *testing.T) {
+	ts, cfg := newTestServer(t)
+	// A 1x1 PNG header is enough for content-type detection by extension.
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "pixel.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(ts.URL + "/api/raw?path=pixel.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("content type = %q, want image/png", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(body, png) {
+		t.Fatalf("raw bytes mismatch: %v", body)
+	}
+
+	missing, err := http.Get(ts.URL + "/api/raw?path=nope.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing raw file: status %d", missing.StatusCode)
+	}
+}
+
+func TestPiEndpoints(t *testing.T) {
+	ts, cfg := newTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Current          string `json:"current"`
+		ApproveSupported bool   `json:"approveSupported"`
+	}
+	decodeBody(t, resp, &status)
+	if status.Current != "0.80.1" || !status.ApproveSupported {
+		t.Fatalf("unexpected pi status: %+v", status)
+	}
+
+	checkResp := postJSON(t, ts.URL+"/api/pi/check", map[string]any{})
+	if checkResp.StatusCode != http.StatusOK {
+		t.Fatalf("pi check: status %d", checkResp.StatusCode)
+	}
+	checkResp.Body.Close()
+
+	autoResp := postJSON(t, ts.URL+"/api/pi/auto", map[string]any{"enabled": true})
+	if autoResp.StatusCode != http.StatusOK {
+		t.Fatalf("pi auto: status %d", autoResp.StatusCode)
+	}
+	autoResp.Body.Close()
+	if s, ok := loadSettings(cfg.SettingsPath); !ok || !s.AutoUpdatePi {
+		t.Fatalf("pi auto-update not persisted: %+v ok=%v", s, ok)
+	}
+
+	updResp := postJSON(t, ts.URL+"/api/pi/update", map[string]any{})
+	if updResp.StatusCode != http.StatusOK {
+		t.Fatalf("pi update: status %d", updResp.StatusCode)
+	}
+	updResp.Body.Close()
+}
+
+// TestBroadcastStreamingSettleSignals asserts the streaming flag flips on the
+// documented settle events plus the skew-insurance aliases.
+func TestBroadcastStreamingSettleSignals(t *testing.T) {
+	for _, settle := range []string{"agent_settled", "agent_end", "turn_end"} {
+		s := &session{subs: map[chan []byte]struct{}{}}
+		s.broadcast([]byte(`{"type":"agent_start"}`))
+		if !s.streaming {
+			t.Fatalf("agent_start should set streaming for %q case", settle)
+		}
+		s.broadcast([]byte(`{"type":"` + settle + `"}`))
+		if s.streaming {
+			t.Fatalf("%q should clear streaming", settle)
+		}
+	}
+	// turn_start also marks streaming.
+	s := &session{subs: map[chan []byte]struct{}{}}
+	s.broadcast([]byte(`{"type":"turn_start"}`))
+	if !s.streaming {
+		t.Fatal("turn_start should set streaming")
+	}
 }
 
 type sseEvent struct {

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>pi-web</title>
+    <script>
+      // Resolve the theme before first paint so there is no flash. The theme
+      // store keeps data-theme in sync afterwards.
+      (function () {
+        var saved = null;
+        try {
+          saved = localStorage.getItem("pi-web:theme");
+        } catch (e) {}
+        var dark =
+          saved === "dark" ||
+          (saved !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
