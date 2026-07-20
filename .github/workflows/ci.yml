@@ -22,6 +22,9 @@ jobs:
       - name: web install
         run: bun install --frozen-lockfile
         working-directory: web
+      - name: web check
+        run: bun run check
+        working-directory: web
       - name: web test
         run: bun run test
         working-directory: web
