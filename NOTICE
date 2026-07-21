@@ -1,0 +1,9 @@
+pi-web
+
+The internal/dtach package is derived from the dtach package of shelley
+(https://github.com/boldsoftware/shelley), Copyright 2026 Bold Software, Inc.,
+used under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
+
+Modifications: PTY allocation rewritten against Go standard-library syscalls
+(replacing github.com/creack/pty), and the terminal-attach CLI removed.

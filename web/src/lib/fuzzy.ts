@@ -76,6 +76,20 @@ export function matchFuzzy(query: string, text: string): FuzzyMatch | null {
   return { text, score, positions };
 }
 
+// highlightSegments splits a match's text into runs for rendering, marking
+// the runs covered by matched positions.
+export function highlightSegments(m: FuzzyMatch): { text: string; hit: boolean }[] {
+  const set = new Set(m.positions);
+  const parts: { text: string; hit: boolean }[] = [];
+  for (let i = 0; i < m.text.length; i++) {
+    const hit = set.has(i);
+    const last = parts[parts.length - 1];
+    if (last && last.hit === hit) last.text += m.text[i];
+    else parts.push({ text: m.text[i], hit });
+  }
+  return parts;
+}
+
 // filterFuzzy ranks candidates and returns the top `limit` matches.
 export function filterFuzzy(query: string, candidates: string[], limit = 50): FuzzyMatch[] {
   const out: FuzzyMatch[] = [];

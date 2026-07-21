@@ -9,25 +9,37 @@
   import ToolBlock from "./ToolBlock.svelte";
   import UserBlock from "./UserBlock.svelte";
   import VirtualFeed from "./VirtualFeed.svelte";
+  import WorkGroupBlock from "./WorkGroupBlock.svelte";
   import { api } from "../lib/api";
   import { rail } from "../lib/rail.svelte";
   import { router } from "../lib/router.svelte";
   import { session } from "../lib/session.svelte";
   import { toasts } from "../lib/toasts.svelte";
-  import type { FeedItem } from "../lib/feed";
+  import {
+    deriveDisplay,
+    displayIndexOf,
+    firstItemIndex,
+    lastItemIndex,
+    type DisplayEntry,
+  } from "../lib/workgroups";
 
   let { onOpenFile }: { onOpenFile: (path: string) => void } = $props();
 
   const view = $derived(session.view);
 
+  // The virtual list renders display entries (tool bursts folded into
+  // groups), while fork ordinals and the spine keep speaking original item
+  // indices — every entry carries its span so the two never drift.
+  const display = $derived(deriveDisplay(view.items, view.tools));
+
   let follow = $state(true);
   let first = $state(0);
   let last = $state(0);
-  let feedEl = $state<ReturnType<typeof VirtualFeed<FeedItem>> | null>(null);
+  let feedEl = $state<ReturnType<typeof VirtualFeed<DisplayEntry>> | null>(null);
 
   function onRange(f: number, l: number): void {
-    first = f;
-    last = l;
+    first = display[f] ? firstItemIndex(display[f]) : f;
+    last = display[l] ? lastItemIndex(display[l]) : l;
   }
 
   // Fork: rewind into a fresh session file at the nth user message. pi's
@@ -91,9 +103,13 @@
 
   {#if view.items.length === 0}
     <div class="empty">
-      <div class="mark" aria-hidden="true">
-        <span></span><span></span><span></span><span></span><span></span>
-      </div>
+      <svg class="mark" viewBox="0 0 100 100" aria-hidden="true">
+        <g fill="none" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 35 H80" />
+          <path d="M38 35 V66 q0 7 -8 7" />
+          <path d="M63 35 V66 q0 7 8 7" />
+        </g>
+      </svg>
       {#if session.pending}
         <p class="where">new session in <strong>{session.pending.cwd ?? "the workspace"}</strong></p>
         <p class="hint">The session is created when you send the first message.</p>
@@ -108,27 +124,32 @@
       <p class="hint keys">Enter sends · ! runs shell · @ inserts a file</p>
     </div>
   {:else}
-    <VirtualFeed items={view.items} resetKey={view.id} bind:follow {onRange} bind:this={feedEl}>
-      {#snippet row(item: FeedItem, index: number)}
+    <VirtualFeed items={display} resetKey={view.id} bind:follow {onRange} bind:this={feedEl}>
+      {#snippet row(entry: DisplayEntry)}
         <div class="row">
-          {#if item.kind === "user"}
-            <UserBlock {item} onFork={session.id ? () => fork(index) : null} />
-          {:else if item.kind === "assistant"}
-            <AssistantBlock {item} tools={view.tools} {onOpenFile} />
-          {:else if item.kind === "bash"}
-            <BashBlock {item} />
-          {:else if item.kind === "tool" && view.tools[item.id]}
-            <ToolBlock tool={view.tools[item.id]} {onOpenFile} />
-          {:else if item.kind === "compaction"}
-            <CompactionBlock {item} />
-          {:else if item.kind === "notice"}
-            <NoticeBlock {item} />
+          {#if entry.kind === "group"}
+            <WorkGroupBlock {entry} items={view.items} tools={view.tools} {onOpenFile} />
+          {:else}
+            {@const item = view.items[entry.index]}
+            {#if item.kind === "user"}
+              <UserBlock {item} onFork={session.id ? () => fork(entry.index) : null} />
+            {:else if item.kind === "assistant"}
+              <AssistantBlock {item} tools={view.tools} {onOpenFile} />
+            {:else if item.kind === "bash"}
+              <BashBlock {item} />
+            {:else if item.kind === "tool" && view.tools[item.id]}
+              <ToolBlock tool={view.tools[item.id]} {onOpenFile} />
+            {:else if item.kind === "compaction"}
+              <CompactionBlock {item} />
+            {:else if item.kind === "notice"}
+              <NoticeBlock {item} />
+            {/if}
           {/if}
         </div>
       {/snippet}
     </VirtualFeed>
 
-    <Spine {view} {first} {last} onJump={(i) => feedEl?.scrollToIndex(i)} />
+    <Spine {view} {first} {last} onJump={(i) => feedEl?.scrollToIndex(displayIndexOf(display, i))} />
 
     {#if !follow}
       <button type="button" class="jump" onclick={() => feedEl?.jumpToBottom()}>
@@ -182,34 +203,14 @@
     padding: 2rem;
     text-align: center;
   }
-  /* the identity mark: a small spine trace */
+  /* the identity mark: a π glyph in the teal accent */
   .mark {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    width: 22px;
+    width: 44px;
+    height: 44px;
     margin-bottom: 1rem;
   }
-  .mark span {
-    height: 3px;
-    border-radius: 1px;
-    background: var(--border-strong);
-  }
-  .mark span:nth-child(1) {
-    background: var(--ink);
-    width: 60%;
-  }
-  .mark span:nth-child(2) {
-    background: color-mix(in srgb, var(--live) 45%, var(--border-strong));
-    height: 9px;
-  }
-  .mark span:nth-child(4) {
-    background: color-mix(in srgb, var(--live) 45%, var(--border-strong));
-    height: 6px;
-  }
-  .mark span:nth-child(5) {
-    background: var(--live);
-    width: 40%;
+  .mark g {
+    stroke: var(--live);
   }
   .where {
     margin: 0;

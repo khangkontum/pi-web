@@ -8,23 +8,34 @@ interface Prefs {
   settleSound: boolean;
 }
 
+const DEFAULTS: Prefs = { settleSound: false };
+
 function read(): Prefs {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { settleSound: false, ...JSON.parse(raw) };
+    if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
   } catch {
     /* fall through */
   }
-  return { settleSound: false };
+  return { ...DEFAULTS };
 }
 
+const stored = read();
+
 class PrefsStore {
-  settleSound = $state(read().settleSound);
+  settleSound = $state(stored.settleSound);
 
   setSettleSound(on: boolean): void {
     this.settleSound = on;
+    this.save();
+  }
+
+  private save(): void {
+    const p: Prefs = {
+      settleSound: this.settleSound,
+    };
     try {
-      localStorage.setItem(KEY, JSON.stringify({ settleSound: on }));
+      localStorage.setItem(KEY, JSON.stringify(p));
     } catch {
       /* best effort */
     }

@@ -122,6 +122,13 @@ func TestHelperPiRPC(t *testing.T) {
 				},
 			})
 			emit(map[string]any{"type": "agent_settled"})
+		case "get_commands":
+			respond(cmd.ID, "get_commands", map[string]any{
+				"commands": []any{
+					map[string]any{"name": "skill:brave-search", "description": "Web search", "source": "skill", "location": "user", "path": "/home/user/.pi/agent/skills/brave-search/SKILL.md"},
+					map[string]any{"name": "fix-tests", "description": "Fix failing tests", "source": "prompt", "location": "project"},
+				},
+			})
 		case "get_fork_messages":
 			respond(cmd.ID, "get_fork_messages", map[string]any{
 				"messages": []any{

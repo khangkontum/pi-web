@@ -31,75 +31,76 @@
   --r-lg: 12px;
   --rail-w: 264px;
   --spine-w: 26px;
-  --measure: 74ch;
+  --measure: 80ch; /* reading column */
+  --measure-wide: 90ch; /* composer — sits a step wider than the prose */
 
-  /* day desk */
-  --bg: #f2f1ed;
-  --surface: #faf9f6;
-  --surface-2: #e9e8e2;
-  --surface-3: #dfded7;
-  --ink: #201f1b;
-  --ink-muted: #6b6961;
-  --ink-faint: #9a978d;
-  --border: #dbd9d0;
-  --border-strong: #bfbcb1;
-  --live: #0e7a6d;
-  --live-ink: #0a5f55;
-  --err: #b03d2e;
-  --warn: #96660d;
-  --ok: #47713f;
-  --think: #5d6a8e;
-  --shadow: 0 8px 32px rgba(32, 31, 27, 0.14), 0 1px 3px rgba(32, 31, 27, 0.1);
-  --scrim: rgba(32, 31, 27, 0.32);
-  --code-bg: #edece6;
+  /* day desk — warm stone, dimmed so the page never glows */
+  --bg: #e2dfd8;
+  --surface: #eae7e0;
+  --surface-2: #d8d4cb;
+  --surface-3: #cdc9bf;
+  --ink: #232219;
+  --ink-muted: #615f56;
+  --ink-faint: #8c897e;
+  --border: #c9c5ba;
+  --border-strong: #a8a598;
+  --live: #0d7367;
+  --live-ink: #0a5b51;
+  --err: #a83a2c;
+  --warn: #8f610c;
+  --ok: #436b3b;
+  --think: #596588;
+  --shadow: 0 8px 32px rgba(35, 34, 25, 0.14), 0 1px 3px rgba(35, 34, 25, 0.1);
+  --scrim: rgba(35, 34, 25, 0.32);
+  --code-bg: #dad6cd;
 }
 
 :root[data-theme="dark"] {
-  /* night desk */
-  --bg: #15171b;
-  --surface: #1b1e23;
-  --surface-2: #22262c;
-  --surface-3: #2a2f36;
-  --ink: #d8d5cc;
-  --ink-muted: #8f8d84;
-  --ink-faint: #605e57;
-  --border: #2a2e35;
-  --border-strong: #3c414a;
+  /* night desk — graphite, lifted off the void */
+  --bg: #23262b;
+  --surface: #292d33;
+  --surface-2: #31363d;
+  --surface-3: #3a4048;
+  --ink: #d3d0c7;
+  --ink-muted: #98968d;
+  --ink-faint: #6e6c63;
+  --border: #383d45;
+  --border-strong: #4b515b;
   --live: #43bfae;
   --live-ink: #5fd2c2;
   --err: #e06c58;
   --warn: #d3a04a;
   --ok: #83ae6f;
   --think: #8b9ac2;
-  --shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
-  --scrim: rgba(8, 9, 11, 0.55);
-  --code-bg: #14161a;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+  --scrim: rgba(12, 13, 15, 0.55);
+  --code-bg: #1f2227;
   color-scheme: dark;
 }
 
 :root {
-  /* ANSI palette tuned for paper — dark-enough tones, bright-white maps to ink */
-  --ansi-0: #3a3936;
-  --ansi-1: #b03d2e;
-  --ansi-2: #47713f;
-  --ansi-3: #96660d;
-  --ansi-4: #3b5ea8;
-  --ansi-5: #8d4a86;
-  --ansi-6: #0e7a6d;
-  --ansi-7: #83817a;
-  --ansi-8: #6b6961;
-  --ansi-9: #c9573f;
-  --ansi-10: #5f8f55;
-  --ansi-11: #a87c17;
-  --ansi-12: #5b7ec7;
-  --ansi-13: #a86aa0;
-  --ansi-14: #2f9a8c;
-  --ansi-15: #201f1b;
+  /* ANSI palette tuned for stone — dark-enough tones, bright-white maps to ink */
+  --ansi-0: #383733;
+  --ansi-1: #a83a2c;
+  --ansi-2: #436b3b;
+  --ansi-3: #8f610c;
+  --ansi-4: #38589e;
+  --ansi-5: #86467f;
+  --ansi-6: #0d7367;
+  --ansi-7: #7d7b73;
+  --ansi-8: #615f56;
+  --ansi-9: #c1523b;
+  --ansi-10: #598750;
+  --ansi-11: #9f7515;
+  --ansi-12: #5577bf;
+  --ansi-13: #a06398;
+  --ansi-14: #2c9184;
+  --ansi-15: #232219;
 }
 
 :root[data-theme="dark"] {
   /* ANSI palette tuned for the night desk — desaturated, easy at length */
-  --ansi-0: #22262c;
+  --ansi-0: #31363d;
   --ansi-1: #e06c58;
   --ansi-2: #83ae6f;
   --ansi-3: #d3a04a;
@@ -107,7 +108,7 @@
   --ansi-5: #b98ac2;
   --ansi-6: #43bfae;
   --ansi-7: #b6b4ac;
-  --ansi-8: #64625c;
+  --ansi-8: #6e6c63;
   --ansi-9: #eb8a76;
   --ansi-10: #9cc487;
   --ansi-11: #e2b569;
@@ -115,6 +116,22 @@
   --ansi-13: #cda4d4;
   --ansi-14: #63d4c4;
   --ansi-15: #e8e6df;
+}
+
+/* syntax highlighting: shiki's css-variables theme reads these; they map
+   token roles onto the existing palette so both desks stay in voice */
+:root {
+  --shiki-foreground: var(--ink);
+  --shiki-background: transparent;
+  --shiki-token-comment: var(--ink-faint);
+  --shiki-token-keyword: var(--ansi-5);
+  --shiki-token-string: var(--ansi-2);
+  --shiki-token-string-expression: var(--ansi-6);
+  --shiki-token-constant: var(--ansi-3);
+  --shiki-token-function: var(--ansi-4);
+  --shiki-token-parameter: var(--ansi-6);
+  --shiki-token-punctuation: var(--ink-muted);
+  --shiki-token-link: var(--live-ink);
 }
 
 /* soft tints derived from the state colors, one place */

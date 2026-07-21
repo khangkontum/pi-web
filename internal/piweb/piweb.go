@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/khangkontum/pi-web/internal/dtach"
 )
 
 // Version identifies the pi-web build; it is reported by /version and by
@@ -51,10 +53,20 @@ type Config struct {
 	// SettingsPath is where the auto-update preference is persisted; empty
 	// keeps the choice in memory only.
 	SettingsPath string
+	// TerminalDir holds private-terminal records and sockets (process
+	// metadata for reattaching to detached shells, not session state); empty
+	// disables the terminal feature.
+	TerminalDir string
 }
 
 // Main is the pi-web entry point. It returns a process exit code.
 func Main(args []string, stdout, stderr io.Writer) int {
+	// Hidden subcommand: `pi-web dtach serve ...` is the detached child that
+	// hosts one private terminal's PTY. Not part of the public CLI surface.
+	if len(args) > 0 && args[0] == "dtach" {
+		return dtachMain(args[1:], stderr)
+	}
+
 	fs := flag.NewFlagSet("pi-web", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", DefaultAddr, "listen address (keep on loopback unless a trusted proxy fronts it)")
@@ -82,6 +94,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		UpdateInterval: *updateInterval,
 		AutoUpdate:     *autoUpdate,
 		SettingsPath:   defaultSettingsPath(),
+		TerminalDir:    defaultTerminalDir(),
 	}
 	if cfg.Workspace == "" {
 		wd, err := os.Getwd()
@@ -111,6 +124,54 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// defaultTerminalDir keeps terminal process metadata next to settings.json;
+// short paths matter (Unix socket sun_path is 104 bytes on darwin).
+func defaultTerminalDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "pi-web", "terminals")
+}
+
+// dtachMain implements `pi-web dtach serve -s SOCK -cwd DIR -cols N -rows N
+// -- argv...`: the blocking PTY host re-exec'd as a detached child.
+func dtachMain(args []string, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "serve" {
+		fmt.Fprintln(stderr, "usage: pi-web dtach serve -s SOCKET [-cwd DIR] [-cols N] [-rows N] -- CMD [ARGS...]")
+		return 2
+	}
+	fs := flag.NewFlagSet("pi-web dtach serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	socket := fs.String("s", "", "unix socket path")
+	cwd := fs.String("cwd", "", "working directory")
+	cols := fs.Uint("cols", 80, "initial columns")
+	rows := fs.Uint("rows", 24, "initial rows")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	argv := fs.Args()
+	if *socket == "" || len(argv) == 0 {
+		fmt.Fprintln(stderr, "pi-web dtach serve: -s and a command are required")
+		return 2
+	}
+	env := append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	err := dtach.Serve(dtach.ServerOptions{
+		SocketPath: *socket,
+		Command:    argv[0],
+		Args:       argv[1:],
+		Dir:        *cwd,
+		Env:        env,
+		Cols:       uint16(*cols),
+		Rows:       uint16(*rows),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "pi-web dtach: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 // Run serves pi-web until ctx is cancelled.
 func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 	sv := newSupervisor(cfg)
@@ -134,9 +195,20 @@ func Run(ctx context.Context, cfg Config, logw io.Writer) error {
 		go pi.run(ctx)
 	}
 
+	// Private terminals are detached children; the manager only rediscovers
+	// them. A failure here degrades the feature, never the server.
+	var tm *terminalManager
+	if cfg.TerminalDir != "" {
+		var err error
+		if tm, err = newTerminalManager(cfg.TerminalDir); err != nil {
+			fmt.Fprintf(logw, "pi-web: terminals disabled: %v\n", err)
+			tm = nil
+		}
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           newServer(cfg, sv, upd, pi),
+		Handler:           newServer(cfg, sv, upd, pi, tm),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

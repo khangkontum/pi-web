@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { filterFuzzy, matchFuzzy } from "./fuzzy";
+import { filterFuzzy, highlightSegments, matchFuzzy } from "./fuzzy";
+
+describe("highlightSegments", () => {
+  it("splits into hit and miss runs", () => {
+    expect(highlightSegments({ text: "skill:dayflow", score: 0, positions: [0, 1, 6, 7, 8] })).toEqual([
+      { text: "sk", hit: true },
+      { text: "ill:", hit: false },
+      { text: "day", hit: true },
+      { text: "flow", hit: false },
+    ]);
+  });
+
+  it("returns one unhit run for an empty query match", () => {
+    expect(highlightSegments({ text: "compact", score: 0, positions: [] })).toEqual([
+      { text: "compact", hit: false },
+    ]);
+  });
+});
 
 describe("matchFuzzy", () => {
   it("matches an exact substring", () => {

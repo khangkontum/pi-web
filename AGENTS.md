@@ -20,11 +20,18 @@ embedded chat UI plus a small JSON API. It drives `pi --mode rpc`
 - `internal/piweb/rpc.go` — JSONL RPC client over the child's stdio.
 - `internal/piweb/sessions.go` — listing and reading pi's JSONL session
   store.
+- `internal/piweb/coldsession.go` — snapshots for sessions with no running
+  child, read straight from the JSONL file so browsing never spawns pi.
 - `internal/piweb/workspace.go` — workspace git/file/bash helpers behind the
   API.
 - `internal/piweb/update.go` — pi-web self-update from GitHub releases.
 - `internal/piweb/piupdate.go` — pi version management (probe, check,
   upgrade).
+- `internal/piweb/terminals.go` — private terminals: detached shells the
+  agent never sees, one `pi-web dtach serve` child per terminal.
+- `internal/dtach/` — dtach-like PTY-behind-a-Unix-socket library (derived
+  from shelley, Apache-2.0 — see NOTICE); PTY allocation is stdlib syscalls
+  only.
 - `internal/piweb/ui/dist/` — the **built** UI embedded with
   `go:embed all:ui/dist`. Gitignored except a placeholder; produced by the
   web build.
@@ -51,11 +58,14 @@ Keep these true — they are the product:
 - **Stateless by design.** Sessions are pi's JSONL files under the session
   directory. pi-web must never grow its own database, cache file, or
   duplicate session state. If pi-web dies, `pi` in a terminal resumes the
-  same sessions untouched. The one sanctioned exception is `settings.go`: a
+  same sessions untouched. The sanctioned exceptions are `settings.go` — a
   single small preference file (auto-update toggles for pi-web and pi)
-  under the user config dir. It holds no session state; keep it that
-  narrow, and do not use it as a foothold for caches or duplicated pi
-  state.
+  under the user config dir — and the private-terminal records under
+  `pi-web/terminals/` in the same dir: process metadata (id, pid, socket
+  path) for reattaching to detached shells, written by `terminals.go` and
+  dropped when their processes die. Neither holds session state; keep them
+  that narrow, and do not use them as a foothold for caches or duplicated
+  pi state.
 - **Loopback trust model.** pi-web binds loopback and authenticates nobody.
   Do not add auth, TLS, accounts, or session cookies — access control is the
   job of whatever fronts it. Decline features that only make sense with

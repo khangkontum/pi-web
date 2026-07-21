@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,9 +23,28 @@ func newTestServer(t *testing.T) (*httptest.Server, Config) {
 	sv := newSupervisor(cfg)
 	t.Cleanup(sv.closeAll)
 	pi := newTestPiManager(t, cfg, sv)
-	ts := httptest.NewServer(newServer(cfg, sv, newUpdater(cfg, testWriter{t}), pi))
+	ts := httptest.NewServer(newServer(cfg, sv, newUpdater(cfg, testWriter{t}), pi, newTestTerminalManager(t)))
 	t.Cleanup(ts.Close)
 	return ts, cfg
+}
+
+// newTestTerminalManager builds a manager whose terminals run in-process
+// (no re-exec, no detach) with a plain /bin/sh, on a socket dir short enough
+// for darwin's sun_path limit.
+func newTestTerminalManager(t *testing.T) *terminalManager {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "pwt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	tm, err := newTerminalManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.spawner = inProcessSpawner
+	tm.shell = []string{"/bin/sh"}
+	return tm
 }
 
 // newTestPiManager builds a piManager with fake collaborators (no pi binary,
@@ -186,6 +206,121 @@ func TestMessageAndBashFlow(t *testing.T) {
 	}
 	if !sawBashEvent {
 		t.Error("expected a piweb_bash broadcast event")
+	}
+}
+
+// TestEventsColdSessionThenPromote: opening a stored session must not spawn
+// a pi child — the snapshot comes from the JSONL file. The first message
+// spawns the child, and the same SSE stream promotes itself with a live
+// snapshot.
+func TestEventsColdSessionThenPromote(t *testing.T) {
+	ts, cfg := newTestServer(t)
+	id := "cdcdcdcd-0000-0000-0000-000000000000"
+	writeSessionFixture(t, cfg.SessionDir, id, "cold history")
+
+	stream, err := http.Get(ts.URL + "/api/sessions/" + id + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	if ct := stream.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("unexpected content type %q", ct)
+	}
+
+	events := readSSE(t, stream, 1, 10*time.Second)
+	if len(events) != 1 || events[0].name != "snapshot" {
+		t.Fatalf("expected a snapshot event, got %+v", events)
+	}
+	var snap struct {
+		ID    string `json:"id"`
+		Cwd   string `json:"cwd"`
+		State struct {
+			IsStreaming bool `json:"isStreaming"`
+		} `json:"state"`
+		Messages struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(events[0].data), &snap); err != nil {
+		t.Fatalf("decode cold snapshot: %v", err)
+	}
+	if snap.ID != id || snap.Cwd != "/tmp/workspace" || snap.State.IsStreaming {
+		t.Fatalf("unexpected cold snapshot: %s", events[0].data)
+	}
+	if len(snap.Messages.Messages) != 1 || snap.Messages.Messages[0].Content != "cold history" {
+		t.Fatalf("cold snapshot should carry the stored transcript: %s", events[0].data)
+	}
+
+	// Viewing must not have spawned a child.
+	var list struct {
+		Sessions []SessionInfo `json:"sessions"`
+	}
+	listResp, err := http.Get(ts.URL + "/api/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeBody(t, listResp, &list)
+	for _, s := range list.Sessions {
+		if s.ID == id && s.Live {
+			t.Fatal("cold view spawned a pi child")
+		}
+	}
+
+	// First message spawns the child; the open stream re-snapshots live.
+	msgResp := postJSON(t, ts.URL+"/api/sessions/"+id+"/message", map[string]any{"message": "wake up"})
+	if msgResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("message: status %d", msgResp.StatusCode)
+	}
+	msgResp.Body.Close()
+
+	events = readSSE(t, stream, 1, 10*time.Second)
+	if len(events) != 1 || events[0].name != "snapshot" {
+		t.Fatalf("expected a live snapshot after first message, got %+v", events)
+	}
+	// The stub's get_messages returns "earlier message" — proof this
+	// snapshot came from the child, not the file.
+	if !strings.Contains(events[0].data, "earlier message") {
+		t.Fatalf("promoted snapshot should come from the live child: %s", events[0].data)
+	}
+
+	listResp, err = http.Get(ts.URL + "/api/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list.Sessions = nil
+	decodeBody(t, listResp, &list)
+	live := false
+	for _, s := range list.Sessions {
+		if s.ID == id {
+			live = s.Live
+		}
+	}
+	if !live {
+		t.Fatal("session should be live after the first message")
+	}
+}
+
+// TestEventsFallsBackToSpawn: a session id with no stored file cannot be
+// cold-rendered, so the events stream resumes a child as before.
+func TestEventsFallsBackToSpawn(t *testing.T) {
+	ts, _ := newTestServer(t)
+	id := "fbfbfbfb-0000-0000-0000-000000000000"
+
+	stream, err := http.Get(ts.URL + "/api/sessions/" + id + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+
+	events := readSSE(t, stream, 1, 10*time.Second)
+	if len(events) != 1 || events[0].name != "snapshot" {
+		t.Fatalf("expected a snapshot event, got %+v", events)
+	}
+	if !strings.Contains(events[0].data, "earlier message") {
+		t.Fatalf("fallback snapshot should come from a live child: %s", events[0].data)
 	}
 }
 
@@ -422,6 +557,41 @@ func TestMessageWithImages(t *testing.T) {
 	}
 	if !sawImageEcho {
 		t.Error("images were not forwarded to the prompt command")
+	}
+}
+
+func TestCommandsEndpoint(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp := postJSON(t, ts.URL+"/api/sessions", map[string]any{})
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeBody(t, resp, &created)
+
+	cmdResp, err := http.Get(ts.URL + "/api/sessions/" + created.ID + "/commands")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmdResp.StatusCode != http.StatusOK {
+		t.Fatalf("commands: status %d", cmdResp.StatusCode)
+	}
+	var body struct {
+		Commands []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Source      string `json:"source"`
+			Location    string `json:"location"`
+		} `json:"commands"`
+	}
+	decodeBody(t, cmdResp, &body)
+	if len(body.Commands) != 2 {
+		t.Fatalf("expected 2 commands, got %+v", body.Commands)
+	}
+	if body.Commands[0].Name != "skill:brave-search" || body.Commands[0].Source != "skill" || body.Commands[0].Location != "user" {
+		t.Fatalf("unexpected first command: %+v", body.Commands[0])
+	}
+	if body.Commands[1].Name != "fix-tests" || body.Commands[1].Description != "Fix failing tests" {
+		t.Fatalf("unexpected second command: %+v", body.Commands[1])
 	}
 }
 
@@ -738,5 +908,275 @@ func writeSessionFixture(t *testing.T, dir, id, firstMessage string) {
 	path := filepath.Join(sub, "2026-07-18T09-00-00_"+id+".jsonl")
 	if err := os.WriteFile(path, []byte(header+"\n"+msg+"\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGitLogAndDiffEndpoints(t *testing.T) {
+	ts, cfg := newTestServer(t)
+	run := gitTestRepo(t, cfg.Workspace)
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "a.txt"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("commit", "-m", "first")
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "a.txt"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/api/git/log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log struct {
+		Commits []gitCommit `json:"commits"`
+	}
+	decodeBody(t, resp, &log)
+	if len(log.Commits) != 1 || log.Commits[0].Subject != "first" {
+		t.Fatalf("unexpected log: %+v", log)
+	}
+
+	resp, err = http.Get(ts.URL + "/api/git/diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diff gitDiff
+	decodeBody(t, resp, &diff)
+	if !strings.Contains(diff.Patch, "+2") {
+		t.Fatalf("working-tree diff missing edit: %+v", diff)
+	}
+
+	resp, err = http.Get(ts.URL + "/api/git/diff?ref=" + log.Commits[0].Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeBody(t, resp, &diff)
+	if !strings.Contains(diff.Patch, "+1") {
+		t.Fatalf("commit diff missing content: %+v", diff)
+	}
+
+	bad, err := http.Get(ts.URL + "/api/git/diff?ref=--output=x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("option-shaped ref: status %d, want 400", bad.StatusCode)
+	}
+
+	// ?path= scopes the patch to one file's working-tree change.
+	resp, err = http.Get(ts.URL + "/api/git/diff?path=a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeBody(t, resp, &diff)
+	if !strings.Contains(diff.Patch, "a.txt") || !strings.Contains(diff.Patch, "+2") {
+		t.Fatalf("file diff missing edit: %+v", diff)
+	}
+
+	// An untracked file renders whole via --no-index.
+	if err := os.WriteFile(filepath.Join(cfg.Workspace, "new.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.Get(ts.URL + "/api/git/diff?path=new.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeBody(t, resp, &diff)
+	if !strings.Contains(diff.Patch, "+hello") {
+		t.Fatalf("untracked file diff missing content: %+v", diff)
+	}
+
+	// A clean/unknown file is the normal empty state, not an error.
+	resp, err = http.Get(ts.URL + "/api/git/diff?path=missing.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeBody(t, resp, &diff)
+	if diff.Patch != "" {
+		t.Fatalf("clean file: want empty patch, got %+v", diff)
+	}
+}
+
+func TestTerminalEndpoints(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	// Create a terminal running /bin/sh in-process.
+	resp := postJSON(t, ts.URL+"/api/terminals", map[string]any{"cols": 80, "rows": 24})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status %d", resp.StatusCode)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeBody(t, resp, &created)
+	if created.ID == "" {
+		t.Fatal("create returned no id")
+	}
+
+	list, err := http.Get(ts.URL + "/api/terminals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listing struct {
+		Terminals []struct {
+			ID string `json:"id"`
+		} `json:"terminals"`
+	}
+	decodeBody(t, list, &listing)
+	if len(listing.Terminals) != 1 || listing.Terminals[0].ID != created.ID {
+		t.Fatalf("list = %+v", listing)
+	}
+
+	// Attach the SSE stream: attached + snapshot first, then live output.
+	streamCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, ts.URL+"/api/terminals/"+created.ID+"/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	if ct := stream.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("stream content type = %q", ct)
+	}
+
+	events := make(chan [2]string, 64)
+	go func() {
+		defer close(events)
+		sc := bufio.NewScanner(stream.Body)
+		var event string
+		for sc.Scan() {
+			line := sc.Text()
+			if after, ok := strings.CutPrefix(line, "event: "); ok {
+				event = after
+			} else if after, ok := strings.CutPrefix(line, "data: "); ok {
+				events <- [2]string{event, after}
+			}
+		}
+	}()
+
+	nextEvent := func(want string) string {
+		t.Helper()
+		for {
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					t.Fatalf("stream closed waiting for %q", want)
+				}
+				if ev[0] == want {
+					return ev[1]
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timeout waiting for %q", want)
+			}
+		}
+	}
+
+	if data := nextEvent("attached"); !strings.Contains(data, created.ID) {
+		t.Fatalf("attached = %q", data)
+	}
+	nextEvent("snapshot")
+
+	// Type into the terminal; the echo must arrive as base64 output.
+	resp = postJSON(t, ts.URL+"/api/terminals/"+created.ID+"/input", map[string]any{"data": "echo wire-shape-ok\n"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("input: status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	deadline := time.After(5 * time.Second)
+	var seen []byte
+	for !bytes.Contains(seen, []byte("wire-shape-ok")) {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatalf("stream ended, got %q", seen)
+			}
+			if ev[0] != "output" {
+				continue
+			}
+			var b64 string
+			if err := json.Unmarshal([]byte(ev[1]), &b64); err != nil {
+				t.Fatalf("output payload not a JSON string: %q", ev[1])
+			}
+			raw, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				t.Fatalf("output not base64: %v", err)
+			}
+			seen = append(seen, raw...)
+		case <-deadline:
+			t.Fatalf("no echoed output, got %q", seen)
+		}
+	}
+
+	resp = postJSON(t, ts.URL+"/api/terminals/"+created.ID+"/resize", map[string]any{"cols": 100, "rows": 30})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("resize: status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Exit the shell: the stream must report exit code 0.
+	resp = postJSON(t, ts.URL+"/api/terminals/"+created.ID+"/input", map[string]any{"data": "exit\n"})
+	resp.Body.Close()
+	if data := nextEvent("exit"); !strings.Contains(data, `"code":0`) {
+		t.Fatalf("exit = %q", data)
+	}
+
+	// The exited terminal is forgotten.
+	list, err = http.Get(ts.URL + "/api/terminals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing.Terminals = nil
+	decodeBody(t, list, &listing)
+	if len(listing.Terminals) != 0 {
+		t.Fatalf("terminal not forgotten after exit: %+v", listing)
+	}
+
+	// Streaming an unknown terminal is a 404.
+	missing, err := http.Get(ts.URL + "/api/terminals/tnope/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown terminal: status %d", missing.StatusCode)
+	}
+}
+
+func TestTerminalKillEndpoint(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp := postJSON(t, ts.URL+"/api/terminals", map[string]any{})
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeBody(t, resp, &created)
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/terminals/"+created.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	del, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	del.Body.Close()
+	if del.StatusCode != http.StatusOK {
+		t.Fatalf("delete: status %d", del.StatusCode)
+	}
+
+	list, err := http.Get(ts.URL + "/api/terminals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listing struct {
+		Terminals []any `json:"terminals"`
+	}
+	decodeBody(t, list, &listing)
+	if len(listing.Terminals) != 0 {
+		t.Fatalf("terminal survived delete: %+v", listing)
 	}
 }

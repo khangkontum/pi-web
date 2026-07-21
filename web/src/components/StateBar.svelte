@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Telemetry strip above the composer: every agent state is visible here —
-  // run state, queue contents, retry countdown, compaction, tokens, context,
-  // cost — plus the session controls popover. No silent stalls.
+  // Telemetry strip rendered inside the composer's footer: every agent state
+  // is visible here — run state, queue contents, retry countdown, compaction,
+  // tokens, context, cost — plus the session controls popover. No silent
+  // stalls. The composer owns the surrounding box; this fills its foot row.
   import Dropdown from "./Dropdown.svelte";
   import Toggle from "./Toggle.svelte";
   import { stripAnsi } from "../lib/ansi";
@@ -38,6 +39,16 @@
   }
 
   const ctxPercent = $derived(view.stats?.contextUsage?.percent ?? null);
+  // Cold sessions carry the context token count but no window size, so the
+  // percent is unknown; fall back to the absolute token figure.
+  const ctxTokens = $derived(view.stats?.contextUsage?.tokens ?? null);
+  const ctxLabel = $derived(
+    ctxPercent !== null
+      ? `${Math.round(ctxPercent)}%`
+      : ctxTokens !== null
+        ? fmtTokens(ctxTokens)
+        : "–",
+  );
 
   const queued = $derived(view.queue.steering.length + view.queue.followUp.length);
 
@@ -101,7 +112,7 @@
   </div>
 
   <div class="right">
-    <span class="tele" title="Input / output tokens">
+    <span class="tele tokens" title="Input / output tokens">
       ▲{fmtTokens(view.stats?.tokens?.input)} ▼{fmtTokens(view.stats?.tokens?.output)}
     </span>
     <span
@@ -109,9 +120,9 @@
       class:hot={ctxPercent !== null && ctxPercent >= 80}
       title="Context window used"
     >
-      ctx {ctxPercent === null ? "–" : `${Math.round(ctxPercent)}%`}
+      ctx {ctxLabel}
     </span>
-    <span class="tele" title="Session cost">{fmtCost(view.stats?.cost)}</span>
+    <span class="tele cost" title="Session cost">{fmtCost(view.stats?.cost)}</span>
 
     {#if session.id}
       <div class="controls" bind:this={controlsEl} onfocusout={onFocusOut}>
@@ -191,15 +202,13 @@
 
 <style>
   .bar {
+    flex: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    max-width: var(--measure);
-    margin: 0 auto;
-    padding: 0.3rem 1.25rem 0;
+    min-width: 0;
     font-size: var(--text-xs);
-    min-height: 1.7rem;
     flex-wrap: wrap;
   }
   .left,
@@ -308,5 +317,22 @@
   .compact-now {
     width: 100%;
     padding: 0.35rem;
+  }
+
+  /* narrow screens: keep the foot to one row — the dot, state label, ctx and
+     controls survive; token/cost figures don't fit and go */
+  @media (max-width: 640px) {
+    .bar,
+    .left,
+    .right {
+      gap: 0.6em;
+    }
+    .tele.tokens,
+    .tele.cost {
+      display: none;
+    }
+    .ext-status {
+      max-width: 8rem;
+    }
   }
 </style>

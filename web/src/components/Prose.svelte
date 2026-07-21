@@ -3,21 +3,27 @@
   // parses with marked and renders through Svelte components — there is no
   // raw-innerHTML path, which matters because the feed can invoke bash
   // (feed XSS = shell RCE). Nothing in this app may bypass this component
-  // into {@html}. Code highlighting (shiki) is heavy, so it loads lazily and
-  // code blocks upgrade in place; the shiki theme follows the app theme.
+  // into {@html}. Code blocks render through CodeBlock (lazy shiki + our
+  // copy control); the shiki theme follows the app theme.
   import { Streamdown } from "svelte-streamdown";
+  import CodeBlock from "./CodeBlock.svelte";
   import { theme } from "../lib/theme.svelte";
 
   let { content, muted = false }: { content: string; muted?: boolean } = $props();
-
-  let Code = $state<typeof import("svelte-streamdown/code").default | null>(null);
-  import("svelte-streamdown/code").then((m) => (Code = m.default));
 
   const shikiTheme = $derived(theme.resolved === "dark" ? "vitesse-dark" : "vitesse-light");
 </script>
 
 <div class="prose" class:muted>
-  <Streamdown {content} {shikiTheme} parseIncompleteMarkdown components={Code ? { code: Code } : {}} />
+  <!-- streamdown's built-in copy/download controls are sized by Tailwind
+       classes we don't ship, so their 100%-width SVGs render gigantic — off -->
+  <Streamdown
+    {content}
+    {shikiTheme}
+    parseIncompleteMarkdown
+    controls={{ code: false, table: false, mermaid: false }}
+    components={{ code: CodeBlock }}
+  />
 </div>
 
 <style>
@@ -51,7 +57,7 @@
   }
   .prose :global(:is(ul, ol)) {
     margin: 0 0 0.8em;
-    padding-left: 1.5em;
+    padding-left: 1.3em;
   }
   .prose :global(li) {
     margin: 0.25em 0;
@@ -68,14 +74,15 @@
     color: var(--ink-muted);
     font-style: italic;
   }
-  /* inline code switches to the machine voice */
+  /* inline code switches to the machine voice — a quiet tint, no border:
+     bordered chips dominate serif lines and read as clutter at density */
   .prose :global(:not(pre) > code) {
     font-family: var(--font-mono);
-    font-size: 0.82em;
-    padding: 0.1em 0.35em;
+    font-size: 0.8em;
+    padding: 0.08em 0.28em;
     background: var(--code-bg);
-    border: 1px solid var(--border);
     border-radius: var(--r-sm);
+    overflow-wrap: anywhere;
   }
   /* fenced code (shiki sets inline colors on inner spans) */
   .prose :global(pre) {
@@ -127,5 +134,20 @@
   .prose :global(> :last-child),
   .prose :global(> div > :last-child) {
     margin-bottom: 0;
+  }
+
+  /* narrow screens: step the reading measure down a notch — same voice,
+     less pressure on short lines */
+  @media (max-width: 700px) {
+    .prose {
+      font-size: calc(var(--text-prose) * 0.94);
+      line-height: 1.58;
+    }
+    .prose :global(:is(ul, ol)) {
+      padding-left: 1.1em;
+    }
+    .prose :global(pre) {
+      padding: 0.55rem 0.65rem;
+    }
   }
 </style>

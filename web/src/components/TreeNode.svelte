@@ -8,10 +8,14 @@
     path,
     depth,
     onOpenFile,
+    gitFiles = {},
+    gitDirs = {},
   }: {
     path: string;
     depth: number;
     onOpenFile: (path: string) => void;
+    gitFiles?: Record<string, string>;
+    gitDirs?: Record<string, boolean>;
   } = $props();
 
   let entries = $state<TreeEntry[] | null>(null);
@@ -44,19 +48,24 @@
         aria-expanded={!!openDirs[e.name]}
         onclick={() => (openDirs[e.name] = !openDirs[e.name])}
       >
-        <span class="chev">{openDirs[e.name] ? "▾" : "▸"}</span>{e.name}/
+        <span class="chev">{openDirs[e.name] ? "▾" : "▸"}</span>{e.name}/{#if gitDirs[`${path}/${e.name}`]}<span
+            class="dot">•</span
+          >{/if}
       </button>
       {#if openDirs[e.name]}
-        <TreeNode path={`${path}/${e.name}`} depth={depth + 1} {onOpenFile} />
+        <TreeNode path={`${path}/${e.name}`} depth={depth + 1} {onOpenFile} {gitFiles} {gitDirs} />
       {/if}
     {:else}
+      {@const st = gitFiles[`${path}/${e.name}`]}
       <button
         type="button"
         class="row file"
+        class:g-add={st === "A" || st === "?"}
+        class:g-mod={st === "M" || st === "R" || st === "U"}
         style:padding-left="{depth * 0.8 + 1.35}rem"
         onclick={() => onOpenFile(`${path}/${e.name}`)}
       >
-        {e.name}
+        {e.name}{#if st}<span class="st">{st === "?" ? "U" : st}</span>{/if}
       </button>
     {/if}
   {/each}
@@ -89,6 +98,23 @@
     display: inline-block;
     width: 0.75rem;
     color: var(--ink-faint);
+  }
+  .g-add,
+  .g-add:hover {
+    color: var(--ansi-2);
+  }
+  .g-mod,
+  .g-mod:hover {
+    color: var(--ansi-3);
+  }
+  .st {
+    margin-left: 0.45rem;
+    font-size: var(--text-xs);
+    opacity: 0.75;
+  }
+  .dot {
+    margin-left: 0.3rem;
+    color: var(--ansi-3);
   }
   .note {
     font-size: var(--text-xs);

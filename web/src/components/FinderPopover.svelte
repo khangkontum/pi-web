@@ -9,7 +9,7 @@
   // /api/files (git-aware, capped server-side); matching is client-side
   // fuzzy. The composer owns the keyboard and forwards keys here.
   import { api } from "../lib/api";
-  import { filterFuzzy, type FuzzyMatch } from "../lib/fuzzy";
+  import { filterFuzzy, highlightSegments, type FuzzyMatch } from "../lib/fuzzy";
 
   let {
     base,
@@ -86,18 +86,6 @@
   function scrollActive(): void {
     listEl?.children[active]?.scrollIntoView({ block: "nearest" });
   }
-
-  function highlight(m: FuzzyMatch): { text: string; hit: boolean }[] {
-    const set = new Set(m.positions);
-    const parts: { text: string; hit: boolean }[] = [];
-    for (let i = 0; i < m.text.length; i++) {
-      const hit = set.has(i);
-      const last = parts[parts.length - 1];
-      if (last && last.hit === hit) last.text += m.text[i];
-      else parts.push({ text: m.text[i], hit });
-    }
-    return parts;
-  }
 </script>
 
 <div class="finder" role="listbox" aria-label="Files">
@@ -117,7 +105,7 @@
           onpointerenter={() => (active = i)}
           onclick={() => onPick(m.text)}
         >
-          {#each highlight(m) as part}
+          {#each highlightSegments(m) as part}
             {#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}
           {/each}
         </button>

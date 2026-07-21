@@ -11,18 +11,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 // gitInfo is the read-only repository summary shown in the session rail.
+// Changes maps workspace-relative paths to a one-letter status (M, A, D, R,
+// U, ?) so the file explorer can tint changed entries.
 type gitInfo struct {
-	Repo       bool   `json:"repo"`
-	Branch     string `json:"branch"`
-	DirtyCount int    `json:"dirtyCount"`
-	Graph      string `json:"graph"`
+	Repo       bool              `json:"repo"`
+	Branch     string            `json:"branch"`
+	DirtyCount int               `json:"dirtyCount"`
+	Graph      string            `json:"graph"`
+	Changes    map[string]string `json:"changes,omitempty"`
 }
 
 // readGitInfo shells out to git on demand; there are no watchers. A workspace
@@ -31,12 +36,18 @@ func readGitInfo(ctx context.Context, workspace string) (gitInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	status, err := gitOutput(ctx, workspace, "status", "--porcelain=v2", "--branch")
+	// --untracked-files=all lists untracked files individually rather than
+	// collapsing new directories, so every explorer row can be tinted.
+	// Forcing status.relativePaths makes porcelain v2 paths relative to the
+	// workspace (not the repo root) regardless of user config; changes
+	// outside a subdirectory workspace then show up as ../ and are dropped.
+	status, err := gitOutput(ctx, workspace, "-c", "status.relativePaths=true",
+		"status", "--porcelain=v2", "--branch", "--untracked-files=all")
 	if err != nil {
 		return gitInfo{Repo: false}, nil
 	}
 
-	info := gitInfo{Repo: true}
+	info := gitInfo{Repo: true, Changes: map[string]string{}}
 	for line := range strings.SplitSeq(status, "\n") {
 		switch {
 		case strings.HasPrefix(line, "# branch.head "):
@@ -44,6 +55,10 @@ func readGitInfo(ctx context.Context, workspace string) (gitInfo, error) {
 		case line == "" || strings.HasPrefix(line, "#"):
 		default:
 			info.DirtyCount++
+			path, st, ok := parseStatusLine(line)
+			if ok && path != ".." && !strings.HasPrefix(path, "../") {
+				info.Changes[path] = st
+			}
 		}
 	}
 
@@ -52,6 +67,65 @@ func readGitInfo(ctx context.Context, workspace string) (gitInfo, error) {
 		info.Graph = graph
 	}
 	return info, nil
+}
+
+// parseStatusLine extracts the path and a one-letter status from one
+// porcelain v2 entry. Paths in v2 records are relative to the repo root.
+func parseStatusLine(line string) (path, status string, ok bool) {
+	switch {
+	case strings.HasPrefix(line, "1 "):
+		parts := strings.SplitN(line, " ", 9)
+		if len(parts) < 9 {
+			return "", "", false
+		}
+		return unquoteGitPath(parts[8]), xyStatus(parts[1]), true
+	case strings.HasPrefix(line, "2 "):
+		parts := strings.SplitN(line, " ", 10)
+		if len(parts) < 10 {
+			return "", "", false
+		}
+		// rename records carry "<newPath>\t<origPath>"
+		newPath, _, _ := strings.Cut(parts[9], "\t")
+		return unquoteGitPath(newPath), "R", true
+	case strings.HasPrefix(line, "u "):
+		parts := strings.SplitN(line, " ", 11)
+		if len(parts) < 11 {
+			return "", "", false
+		}
+		return unquoteGitPath(parts[10]), "U", true
+	case strings.HasPrefix(line, "? "):
+		return unquoteGitPath(line[2:]), "?", true
+	}
+	return "", "", false
+}
+
+// xyStatus reduces a porcelain XY pair to one letter, preferring the
+// worktree side over the index side.
+func xyStatus(xy string) string {
+	if len(xy) != 2 {
+		return "M"
+	}
+	c := xy[1]
+	if c == '.' {
+		c = xy[0]
+	}
+	switch c {
+	case 'A', 'D', 'R':
+		return string(c)
+	default:
+		return "M"
+	}
+}
+
+// unquoteGitPath undoes git's C-style quoting of paths with special
+// characters; plain paths pass through unchanged.
+func unquoteGitPath(p string) string {
+	if len(p) >= 2 && strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) {
+		if u, err := strconv.Unquote(p); err == nil {
+			return u
+		}
+	}
+	return p
 }
 
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
@@ -63,6 +137,176 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 		return "", err
 	}
 	return strings.TrimRight(out.String(), "\n"), nil
+}
+
+// gitPatchOutput runs a git diff-style command where exit status 1 means
+// "differences found", not failure.
+func gitPatchOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &bytes.Buffer{}
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		err = nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(out.String(), "\n"), nil
+}
+
+// gitCommit is one commit in the structured history feed behind the git
+// overlay; Parents is what lets the client draw graph lanes.
+type gitCommit struct {
+	Hash    string   `json:"hash"`
+	Parents []string `json:"parents"`
+	Refs    string   `json:"refs"`
+	Author  string   `json:"author"`
+	Date    string   `json:"date"`
+	Subject string   `json:"subject"`
+}
+
+// gitLogLimit caps the history feed; the overlay is an audit view, not a full
+// repository browser.
+const gitLogLimit = 200
+
+// readGitLog returns newest-first commit history for the graph view. A
+// directory that is not a repository returns an empty list, mirroring
+// readGitInfo's non-error treatment.
+func readGitLog(ctx context.Context, base string) ([]gitCommit, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// \x1f separates fields; %s is the subject line so records stay one-per-line.
+	out, err := gitOutput(ctx, base, "log", "--all",
+		"--pretty=format:%H%x1f%P%x1f%D%x1f%an%x1f%aI%x1f%s", "-n", strconv.Itoa(gitLogLimit))
+	if err != nil {
+		return []gitCommit{}, nil
+	}
+	commits := []gitCommit{}
+	for line := range strings.SplitSeq(out, "\n") {
+		parts := strings.Split(line, "\x1f")
+		if len(parts) != 6 {
+			continue
+		}
+		commits = append(commits, gitCommit{
+			Hash:    parts[0],
+			Parents: strings.Fields(parts[1]),
+			Refs:    parts[2],
+			Author:  parts[3],
+			Date:    parts[4],
+			Subject: parts[5],
+		})
+	}
+	return commits, nil
+}
+
+// gitDiff is a unified patch plus whether the server truncated it.
+type gitDiff struct {
+	Patch     string `json:"patch"`
+	Truncated bool   `json:"truncated"`
+}
+
+// gitDiffLimit caps a served patch; a vendored-dependency commit can be tens
+// of megabytes and the viewer marks truncation instead.
+const gitDiffLimit = 1 << 20
+
+// gitUntrackedLimit bounds how many untracked files are rendered into the
+// working-tree patch.
+const gitUntrackedLimit = 50
+
+// gitRefPattern is the only ref shape the diff endpoint accepts: HEAD or a
+// hex hash. Nothing that could be parsed as a git option gets through.
+var gitRefPattern = regexp.MustCompile(`^(HEAD|[0-9a-fA-F]{4,40})$`)
+
+// readGitDiff returns the patch for one commit (ref), or with an empty ref the
+// full working-tree change: staged and unstaged edits vs HEAD, plus untracked
+// files rendered via --no-index so new files the agent wrote are auditable.
+func readGitDiff(ctx context.Context, base, ref string) (gitDiff, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	if ref != "" {
+		if !gitRefPattern.MatchString(ref) {
+			return gitDiff{}, fmt.Errorf("invalid ref %q", ref)
+		}
+		out, err := gitOutput(ctx, base, "show", "--format=", "--patch", ref)
+		if err != nil {
+			return gitDiff{}, fmt.Errorf("git show %s: %w", ref, err)
+		}
+		return capPatch(out, false), nil
+	}
+
+	// Working tree vs HEAD; a repository with no commits yet has no HEAD, so
+	// fall back to the index diff. Any git failure (not a repo) is the normal
+	// empty state.
+	parts := []string{}
+	patch, err := gitPatchOutput(ctx, base, "diff", "HEAD")
+	if err != nil {
+		patch, _ = gitPatchOutput(ctx, base, "diff")
+	}
+	if patch != "" {
+		parts = append(parts, patch)
+	}
+
+	skipped := false
+	if untracked, err := gitOutput(ctx, base, "ls-files", "--others", "--exclude-standard"); err == nil && untracked != "" {
+		files := strings.Split(untracked, "\n")
+		if len(files) > gitUntrackedLimit {
+			files = files[:gitUntrackedLimit]
+			skipped = true
+		}
+		for _, f := range files {
+			p, err := gitPatchOutput(ctx, base, "diff", "--no-index", "--", os.DevNull, f)
+			if err == nil && p != "" {
+				parts = append(parts, p)
+			}
+		}
+	}
+	return capPatch(strings.Join(parts, "\n"), skipped), nil
+}
+
+// readGitFileDiff returns the working-tree patch scoped to a single file:
+// staged and unstaged edits vs HEAD for a tracked file, or the whole file via
+// --no-index when it is untracked. Tracked-ness is decided with `git ls-files`,
+// which only reads the index — unlike `git diff`, which refreshes the whole
+// index (an lstat over every tracked file) before honouring the pathspec, so an
+// untracked file must never reach it on a large repo. The "--" guard means the
+// caller-supplied path can never be read as a git option. Not a repository, or a
+// clean/ignored file, is the normal empty state.
+func readGitFileDiff(ctx context.Context, base, path string) (gitDiff, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	if tracked, err := gitOutput(ctx, base, "ls-files", "--", path); err == nil && tracked != "" {
+		patch, err := gitPatchOutput(ctx, base, "diff", "HEAD", "--", path)
+		if err != nil {
+			patch, _ = gitPatchOutput(ctx, base, "diff", "--", path)
+		}
+		return capPatch(patch, false), nil
+	}
+
+	// Untracked (and not ignored): render the whole file as an addition without
+	// ever touching the index.
+	if others, err := gitOutput(ctx, base, "ls-files", "--others", "--exclude-standard", "--", path); err == nil && others != "" {
+		patch, _ := gitPatchOutput(ctx, base, "diff", "--no-index", "--", os.DevNull, path)
+		return capPatch(patch, false), nil
+	}
+	return gitDiff{}, nil
+}
+
+// capPatch enforces gitDiffLimit, cutting at a line boundary.
+func capPatch(patch string, truncated bool) gitDiff {
+	if len(patch) <= gitDiffLimit {
+		return gitDiff{Patch: patch, Truncated: truncated}
+	}
+	cut := patch[:gitDiffLimit]
+	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+		cut = cut[:i]
+	}
+	return gitDiff{Patch: cut, Truncated: true}
 }
 
 // fileIndexLimit caps how many paths the file index returns; a client-side

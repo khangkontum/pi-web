@@ -32,12 +32,13 @@ accounts, cookies, or TLS.
 | --- | --- |
 | `GET /api/sessions` | List sessions (stored + live) |
 | `POST /api/sessions` | Create a session (optional `message`, `name`, `cwd`, `provider`+`modelId`, `thinking`) |
-| `GET /api/sessions/{id}/events` | SSE stream of agent events (snapshot includes the session `cwd`) |
+| `GET /api/sessions/{id}/events` | SSE stream of agent events (snapshot includes the session `cwd`). A session with no running child is served cold: the snapshot is read from its JSONL file without spawning pi, and the stream re-snapshots from the child once something interacts with the session |
 | `POST /api/sessions/{id}/message` | Send a message to a session (optional `images: [{data, mimeType}]`, base64) |
 | `POST /api/sessions/{id}/abort` | Abort the current turn |
 | `POST /api/sessions/{id}/bash` | Run a shell command in the workspace |
 | `POST /api/sessions/{id}/model` | Switch the session model (`{provider, modelId}`) |
 | `POST /api/sessions/{id}/thinking` | Set reasoning effort (`{level}`: off/minimal/low/medium/high/xhigh) |
+| `GET /api/sessions/{id}/commands` | List slash commands pi accepts: extensions, prompt templates, skills (`get_commands`) |
 | `GET /api/sessions/{id}/fork-messages` | List user messages available to fork from (`get_fork_messages`) |
 | `POST /api/sessions/{id}/fork` | Fork the session at `{entryId}`; broadcasts a `piweb_fork` event |
 | `POST /api/sessions/{id}/compact` | Manually compact the session context (`compact`) |
@@ -49,9 +50,17 @@ accounts, cookies, or TLS.
 | `GET /api/dirs` | List subdirectories of `?path=` for the new-session folder picker |
 | `GET /api/tree` | List immediate children (dirs + files) of `?path=` for the file explorer |
 | `GET /api/files` | Flat file index of `?base=` for a fuzzy finder (`git ls-files`, bounded walk fallback) |
-| `GET /api/git` | Git summary of `?base=` (defaults to the workspace) |
+| `GET /api/git` | Git summary of `?base=` (defaults to the workspace): `{repo, branch, dirtyCount, graph, changes}`, where `changes` maps workspace-relative paths to a one-letter status (M/A/D/R/U/?) |
+| `GET /api/git/log` | Structured commit history of `?base=` `{commits: [{hash, parents, refs, author, date, subject}]}`, newest first, capped at 200 |
+| `GET /api/git/diff` | Unified patch `{patch, truncated}`: working tree incl. untracked with no `?ref=`, one commit with `?ref=<hex hash\|HEAD>`, or a single file's working-tree patch with `?path=<file>`; capped at 1 MiB |
 | `GET /api/file` | Read a file as text (relative paths resolve against `?base=`) |
 | `GET /api/raw` | Serve a file's raw bytes with a detected content type (`?path=`, relative to `?base=`) |
+| `POST /api/terminals` | Spawn a private terminal (`{cwd, cols, rows}`) → `{id, cwd, createdAt}` |
+| `GET /api/terminals` | List live private terminals `{terminals: [{id, cwd, shell, createdAt}]}` |
+| `GET /api/terminals/{id}/stream` | SSE attachment: `attached` `{id}`, `snapshot` (base64), `output` (base64), `exit` `{code}` |
+| `POST /api/terminals/{id}/input` | Write keystrokes to the terminal PTY (`{data}`) |
+| `POST /api/terminals/{id}/resize` | Resize the terminal PTY (`{cols, rows}`) |
+| `DELETE /api/terminals/{id}` | SIGTERM the terminal's process group and drop its record |
 | `GET /api/update` | pi-web update status `{current, latest, available, autoUpdate, canUpdate, checkedAt}` |
 | `POST /api/update/check` | Force a pi-web update check |
 | `POST /api/update/apply` | Install the latest pi-web release and restart |
@@ -78,8 +87,9 @@ self-update. Any failure leaves the installed binary untouched.
 
 The auto-update preferences (`autoUpdate` for pi-web, `autoUpdatePi` for the pi
 coding agent) are persisted to `settings.json` under the user config directory
-(honouring `XDG_CONFIG_HOME` on Linux) so they survive restarts. This is the
-only state pi-web writes of its own.
+(honouring `XDG_CONFIG_HOME` on Linux) so they survive restarts. Besides these
+preferences, the only other files pi-web writes of its own are private-terminal
+process records (see Private terminals below).
 
 ## pi version management
 
@@ -144,3 +154,21 @@ https://github.com/khangkontum/pi-web/releases/latest/download/release.json
 `release.json` carries `{version, commit, published_at, checksums_url,
 download_urls}` — everything a client needs to check for and verify an update
 without touching the GitHub API.
+
+## Private terminals
+
+`/api/terminals` drives interactive shells that live **outside** the pi
+session context. Unlike the `!` bash (which runs through pi's `bash` RPC so
+the agent sees it), a private terminal never appears in pi's RPC, session
+JSONL, or the session event stream — it is for commands the agent should not
+see. The isolation is "not in the session context", not a sandbox: the shell
+is still an ordinary process on the machine.
+
+Each terminal is a detached `pi-web dtach serve` child (its own process
+session via setsid) hosting the user's login shell on a PTY behind a Unix
+socket, with a 256 KiB scrollback ring replayed to every attacher. Terminals
+therefore survive pi-web restarts — including self-update — and browser
+refreshes repaint from the snapshot. Records (id, pid, socket path) live
+under the user config dir (`pi-web/terminals/`); they are process metadata
+for reattaching, not session state. A terminal runs until its shell exits or
+`DELETE` kills it; stale records are dropped at boot.

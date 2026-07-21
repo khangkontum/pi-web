@@ -135,6 +135,9 @@ type supervisor struct {
 
 	mu       sync.Mutex
 	sessions map[string]*session
+	// liveCh is closed and replaced whenever a child spawns, so cold event
+	// streams can promote themselves to live without polling.
+	liveCh chan struct{}
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -144,6 +147,7 @@ func newSupervisor(cfg Config) *supervisor {
 	sv := &supervisor{
 		cfg:      cfg,
 		sessions: make(map[string]*session),
+		liveCh:   make(chan struct{}),
 		stop:     make(chan struct{}),
 	}
 	sv.wg.Add(1)
@@ -215,8 +219,34 @@ func (sv *supervisor) create(ctx context.Context, cwd string) (*session, error) 
 	}
 	sv.mu.Lock()
 	sv.sessions[s.id] = s
+	sv.signalLiveLocked()
 	sv.mu.Unlock()
 	return s, nil
+}
+
+// lookup returns the live session for id, or nil — it never spawns one.
+func (sv *supervisor) lookup(id string) *session {
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+	if s, ok := sv.sessions[id]; ok && s.rpc.alive() {
+		return s
+	}
+	return nil
+}
+
+// liveSignal returns a channel that is closed the next time any session goes
+// live. Waiters re-fetch the channel and re-check lookup after each close.
+func (sv *supervisor) liveSignal() <-chan struct{} {
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+	return sv.liveCh
+}
+
+// signalLiveLocked wakes cold event streams after a session is registered.
+// Callers hold sv.mu.
+func (sv *supervisor) signalLiveLocked() {
+	close(sv.liveCh)
+	sv.liveCh = make(chan struct{})
 }
 
 // get returns the live session for id, starting a pi child resuming that
@@ -257,6 +287,7 @@ func (sv *supervisor) get(ctx context.Context, id string) (*session, error) {
 		return existing, nil
 	}
 	sv.sessions[id] = s
+	sv.signalLiveLocked()
 	sv.mu.Unlock()
 	return s, nil
 }

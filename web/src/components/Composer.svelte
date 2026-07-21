@@ -1,8 +1,12 @@
 <script lang="ts">
   // The operator's input. Enter sends (IME-safe), Shift+Enter breaks a line,
-  // `!` runs shell in the session cwd, `@` opens the fuzzy file finder,
-  // images paste/drop in as chips, drafts persist per session.
+  // `!` runs shell in the session cwd, `@` opens the fuzzy file finder, `/`
+  // at the start opens the slash-command autocomplete, images paste/drop in
+  // as chips, drafts persist per session. The state bar and the send/stop
+  // buttons live in a footer strip inside the same box.
+  import CommandPopover from "./CommandPopover.svelte";
   import FinderPopover from "./FinderPopover.svelte";
+  import StateBar from "./StateBar.svelte";
   import { api, type ImagePart } from "../lib/api";
   import { NEW_SESSION, clearDraft, loadDraft, saveDraft } from "../lib/drafts";
   import { rail } from "../lib/rail.svelte";
@@ -23,11 +27,16 @@
   let dragOver = $state(false);
   let textarea = $state<HTMLTextAreaElement | null>(null);
   let finder = $state<ReturnType<typeof FinderPopover> | null>(null);
+  let commandList = $state<ReturnType<typeof CommandPopover> | null>(null);
 
   // finder state: the "@token" under the caret
   let finderOpen = $state(false);
   let finderQuery = $state("");
   let atStart = -1;
+
+  // command state: the "/name" token opening the message
+  let commandOpen = $state(false);
+  let commandQuery = $state("");
 
   const draftKey = $derived(session.pending ? NEW_SESSION : view.id || "");
 
@@ -68,12 +77,25 @@
     textarea.style.height = `${Math.min(textarea.scrollHeight, 320)}px`;
   }
 
-  // --- @ finder -------------------------------------------------------------
+  // --- @ finder and / commands ----------------------------------------------
 
   function syncFinder(): void {
     if (!textarea) return;
     const caret = textarea.selectionStart ?? text.length;
     const upto = text.slice(0, caret);
+    // a leading / opens the command list while the caret stays inside the
+    // command token; commands come from the live session's pi, so a pending
+    // session has none to offer yet
+    if (session.id && text.startsWith("/") && caret > 0 && !/\s/.test(upto)) {
+      commandQuery = upto.slice(1);
+      commandOpen = true;
+      finderOpen = false;
+      finderQuery = "";
+      atStart = -1;
+      return;
+    }
+    commandOpen = false;
+    commandQuery = "";
     const at = upto.lastIndexOf("@");
     // an @ opens the finder when it starts a token (start of text or after
     // whitespace) and the query since it contains no whitespace
@@ -93,6 +115,8 @@
     finderOpen = false;
     finderQuery = "";
     atStart = -1;
+    commandOpen = false;
+    commandQuery = "";
   }
 
   function pickFile(path: string): void {
@@ -100,6 +124,19 @@
     const caret = textarea.selectionStart ?? text.length;
     text = text.slice(0, atStart) + path + " " + text.slice(caret);
     const pos = atStart + path.length + 1;
+    closeFinder();
+    queueMicrotask(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(pos, pos);
+      onInput();
+    });
+  }
+
+  function pickCommand(name: string): void {
+    if (!textarea) return;
+    const caret = textarea.selectionStart ?? text.length;
+    text = "/" + name + " " + text.slice(caret);
+    const pos = name.length + 2;
     closeFinder();
     queueMicrotask(() => {
       textarea?.focus();
@@ -205,6 +242,19 @@
     textarea?.focus();
   }
 
+  export function insertQuote(quoted: string): void {
+    const block = quoted
+      .split("\n")
+      .map((line) => "> " + line)
+      .join("\n");
+    text = (text.trim() ? text.trimEnd() + "\n\n" : "") + block + "\n\n";
+    queueMicrotask(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(text.length, text.length);
+      onInput();
+    });
+  }
+
   export function abortTurn(): void {
     if (view.streaming) stop();
   }
@@ -213,6 +263,10 @@
     // IME (Vietnamese/CJK) commits must never send early
     if (e.isComposing || e.keyCode === 229) return;
     if (finderOpen && finder?.handleKey(e)) {
+      e.preventDefault();
+      return;
+    }
+    if (commandOpen && commandList?.handleKey(e)) {
       e.preventDefault();
       return;
     }
@@ -249,6 +303,16 @@
     />
   {/if}
 
+  {#if commandOpen && session.id}
+    <CommandPopover
+      sessionId={session.id}
+      query={commandQuery}
+      onPick={pickCommand}
+      onClose={closeFinder}
+      bind:this={commandList}
+    />
+  {/if}
+
   {#if images.length > 0}
     <div class="chips">
       {#each images as img, i (i)}
@@ -260,37 +324,42 @@
     </div>
   {/if}
 
-  <div class="input-row">
-    <span class="prompt" aria-hidden="true">{text.trimStart().startsWith("!") ? "!" : "❯"}</span>
-    <textarea
-      bind:this={textarea}
-      bind:value={text}
-      rows="1"
-      placeholder={session.pending || session.id
-        ? "message · !shell · @file"
-        : "pick or create a session to begin"}
-      disabled={!session.pending && !session.id}
-      oninput={onInput}
-      onkeydown={onKeydown}
-      onpaste={onPaste}
-      onclick={syncFinder}
-      onkeyup={(e) => {
-        if (e.key.startsWith("Arrow")) syncFinder();
-      }}
-    ></textarea>
-    {#if view.streaming}
-      <button type="button" class="stop" onclick={stop} title="Abort the current turn (⌘.)">
-        ■ stop
+  <div class="box">
+    <div class="input-row">
+      <span class="prompt" aria-hidden="true">{text.trimStart().startsWith("!") ? "!" : "❯"}</span>
+      <textarea
+        bind:this={textarea}
+        bind:value={text}
+        rows="1"
+        placeholder={session.pending || session.id
+          ? "message · /command · !shell · @file"
+          : "pick or create a session to begin"}
+        disabled={!session.pending && !session.id}
+        oninput={onInput}
+        onkeydown={onKeydown}
+        onpaste={onPaste}
+        onclick={syncFinder}
+        onkeyup={(e) => {
+          if (e.key.startsWith("Arrow")) syncFinder();
+        }}
+      ></textarea>
+    </div>
+    <div class="foot">
+      <StateBar />
+      {#if view.streaming}
+        <button type="button" class="stop" onclick={stop} title="Abort the current turn (⌘.)">
+          ■ stop
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="send"
+        disabled={sending || (!text.trim() && images.length === 0) || (!session.pending && !session.id)}
+        onclick={submit}
+      >
+        {view.streaming ? "steer" : "send"}
       </button>
-    {/if}
-    <button
-      type="button"
-      class="send"
-      disabled={sending || (!text.trim() && images.length === 0) || (!session.pending && !session.id)}
-      onclick={submit}
-    >
-      {view.streaming ? "steer" : "send"}
-    </button>
+    </div>
   </div>
 
   {#each Object.entries(view.widgetsBelow) as [key, lines] (key)}
@@ -301,12 +370,12 @@
 <style>
   .composer {
     position: relative;
-    max-width: var(--measure);
+    max-width: var(--measure-wide);
     margin: 0 auto;
     width: 100%;
-    padding: 0.4rem 1.25rem 0.9rem;
+    padding: 0.65rem 1.25rem 0.9rem;
   }
-  .composer.drag .input-row {
+  .composer.drag .box {
     border-color: var(--live);
     background: var(--live-soft);
   }
@@ -348,17 +417,29 @@
     background: var(--ink);
     border-radius: 50%;
   }
-  .input-row {
-    display: flex;
-    align-items: flex-end;
-    gap: 0.6rem;
-    padding: 0.55rem 0.75rem;
+  .box {
     background: var(--surface);
     border: 1px solid var(--border-strong);
     border-radius: var(--r-lg);
   }
-  .input-row:focus-within {
+  .box:focus-within {
     border-color: var(--live);
+  }
+  .input-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 0.65rem 0.75rem 0.5rem 0.9rem;
+  }
+  .foot {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.3rem 0.55rem 0.3rem 0.9rem;
+    border-top: 1px solid var(--border);
+    background: var(--surface-2);
+    /* inner radius tracks the box border so the tinted foot fills the corners */
+    border-radius: 0 0 calc(var(--r-lg) - 1px) calc(var(--r-lg) - 1px);
   }
   .prompt {
     color: var(--live);
@@ -375,6 +456,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-md);
     line-height: 1.5;
+    min-height: 4.5em;
     max-height: 320px;
     padding: 0;
   }

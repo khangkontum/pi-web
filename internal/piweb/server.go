@@ -3,6 +3,7 @@ package piweb
 import (
 	"context"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/khangkontum/pi-web/internal/dtach"
 )
 
 //go:embed all:ui/dist
@@ -40,6 +43,7 @@ type server struct {
 	sv  *supervisor
 	upd *updater
 	pi  *piManager
+	tm  *terminalManager
 	mux *http.ServeMux
 
 	modelsMu    sync.Mutex
@@ -47,8 +51,8 @@ type server struct {
 	modelsAt    time.Time
 }
 
-func newServer(cfg Config, sv *supervisor, upd *updater, pi *piManager) *server {
-	s := &server{cfg: cfg, sv: sv, upd: upd, pi: pi, mux: http.NewServeMux()}
+func newServer(cfg Config, sv *supervisor, upd *updater, pi *piManager, tm *terminalManager) *server {
+	s := &server{cfg: cfg, sv: sv, upd: upd, pi: pi, tm: tm, mux: http.NewServeMux()}
 
 	s.mux.Handle("GET /", uiHandler())
 
@@ -61,6 +65,7 @@ func newServer(cfg Config, sv *supervisor, upd *updater, pi *piManager) *server 
 	s.mux.HandleFunc("POST /api/sessions/{id}/bash", s.handleBash)
 	s.mux.HandleFunc("POST /api/sessions/{id}/model", s.handleSetModel)
 	s.mux.HandleFunc("POST /api/sessions/{id}/thinking", s.handleSetThinking)
+	s.mux.HandleFunc("GET /api/sessions/{id}/commands", s.handleCommands)
 	s.mux.HandleFunc("GET /api/sessions/{id}/fork-messages", s.handleForkMessages)
 	s.mux.HandleFunc("POST /api/sessions/{id}/fork", s.handleFork)
 	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.handleCompact)
@@ -73,8 +78,16 @@ func newServer(cfg Config, sv *supervisor, upd *updater, pi *piManager) *server 
 	s.mux.HandleFunc("GET /api/tree", s.handleTree)
 	s.mux.HandleFunc("GET /api/files", s.handleFiles)
 	s.mux.HandleFunc("GET /api/git", s.handleGit)
+	s.mux.HandleFunc("GET /api/git/log", s.handleGitLog)
+	s.mux.HandleFunc("GET /api/git/diff", s.handleGitDiff)
 	s.mux.HandleFunc("GET /api/file", s.handleFile)
 	s.mux.HandleFunc("GET /api/raw", s.handleRaw)
+	s.mux.HandleFunc("POST /api/terminals", s.handleTerminalCreate)
+	s.mux.HandleFunc("GET /api/terminals", s.handleTerminalList)
+	s.mux.HandleFunc("GET /api/terminals/{id}/stream", s.handleTerminalStream)
+	s.mux.HandleFunc("POST /api/terminals/{id}/input", s.handleTerminalInput)
+	s.mux.HandleFunc("POST /api/terminals/{id}/resize", s.handleTerminalResize)
+	s.mux.HandleFunc("DELETE /api/terminals/{id}", s.handleTerminalKill)
 	s.mux.HandleFunc("GET /api/update", s.handleUpdateStatus)
 	s.mux.HandleFunc("POST /api/update/check", s.handleUpdateCheck)
 	s.mux.HandleFunc("POST /api/update/apply", s.handleUpdateApply)
@@ -187,10 +200,15 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEvents is the SSE stream: a snapshot of the full session first, then
-// live pi events, plus synthetic pi-web events (operator bash, stats).
+// live pi events, plus synthetic pi-web events (operator bash, stats). A
+// session with no running child is served cold — the snapshot is read
+// straight from its JSONL file and no pi process is spawned until something
+// interacts with the session; the stream then promotes itself to the live
+// child and re-snapshots.
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.session(w, r)
-	if !ok {
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("missing session id"))
 		return
 	}
 	fl, canFlush := w.(http.Flusher)
@@ -199,13 +217,71 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Grab the live signal before checking for a child: a session going live
+	// between the two is caught by either the lookup or the signal.
+	liveCh := s.sv.liveSignal()
+	sess := s.sv.lookup(id)
+	if sess == nil {
+		if s.serveColdEvents(w, r, fl, id, liveCh) {
+			return
+		}
+		// Not cold-renderable (no stored file, unknown session version,
+		// unreadable): resume a child, which handles anything pi can.
+		var err error
+		sess, err = s.sv.get(r.Context(), id)
+		if err != nil {
+			httpError(w, http.StatusBadGateway, err)
+			return
+		}
+	}
+
+	writeSSEHeaders(w)
+	s.streamSession(w, r, fl, sess)
+}
+
+// serveColdEvents renders a stored session from its JSONL file. It reports
+// false — before writing anything — when the file cannot be cold-rendered,
+// so the caller falls back to spawning. After the cold snapshot the stream
+// idles; when the session goes live (first message, fork, operator bash) it
+// re-snapshots from the child and continues live on the same connection.
+func (s *server) serveColdEvents(w http.ResponseWriter, r *http.Request, fl http.Flusher, id string, liveCh <-chan struct{}) bool {
+	path, _, ok := sessionFileByID(s.cfg.SessionDir, id)
+	if !ok {
+		return false
+	}
+	snapshot, err := readColdSnapshot(path)
+	if err != nil {
+		return false
+	}
+
+	writeSSEHeaders(w)
+	writeSSE(w, "snapshot", snapshot)
+	fl.Flush()
+
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return true
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			fl.Flush()
+		case <-liveCh:
+			liveCh = s.sv.liveSignal()
+			if sess := s.sv.lookup(id); sess != nil {
+				s.streamSession(w, r, fl, sess)
+				return true
+			}
+		}
+	}
+}
+
+// streamSession snapshots a live session and forwards its events until the
+// client disconnects or the subscription is dropped.
+func (s *server) streamSession(w http.ResponseWriter, r *http.Request, fl http.Flusher, sess *session) {
 	sub := sess.subscribe()
 	defer sess.unsubscribe(sub)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
 
 	snapshot, err := s.snapshot(r.Context(), sess)
 	if err != nil {
@@ -233,6 +309,13 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 	}
+}
+
+func writeSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
 }
 
 // snapshot collects state, full message history, and stats in one payload so
@@ -381,6 +464,234 @@ func (s *server) handleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// handleGitLog serves structured commit history for the git overlay's graph
+// view; a non-repository base is the normal empty state.
+func (s *server) handleGitLog(w http.ResponseWriter, r *http.Request) {
+	commits, err := readGitLog(r.Context(), s.base(r))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"commits": commits})
+}
+
+// handleGitDiff serves a unified patch: the working tree (staged, unstaged,
+// untracked) with no ?ref=, one commit's patch with ?ref=<hash|HEAD>, or a
+// single file's working-tree patch with ?path=<file> (for the file preview).
+func (s *server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
+	if path := strings.TrimSpace(r.URL.Query().Get("path")); path != "" {
+		diff, err := readGitFileDiff(r.Context(), s.base(r), path)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, diff)
+		return
+	}
+	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+	diff, err := readGitDiff(r.Context(), s.base(r), ref)
+	if err != nil {
+		status := http.StatusNotFound
+		if !gitRefPattern.MatchString(ref) {
+			status = http.StatusBadRequest
+		}
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, diff)
+}
+
+// terminals gates the private-terminal handlers on the manager existing; it
+// is nil when no config directory could be resolved.
+func (s *server) terminals(w http.ResponseWriter) (*terminalManager, bool) {
+	if s.tm == nil {
+		httpError(w, http.StatusServiceUnavailable, errTerminalsDisabled)
+		return nil, false
+	}
+	return s.tm, true
+}
+
+// handleTerminalCreate spawns a detached interactive shell. Nothing about
+// terminals is ever broadcast to session subscribers: unlike the `!` bash,
+// a private terminal stays outside the agent's session context entirely.
+func (s *server) handleTerminalCreate(w http.ResponseWriter, r *http.Request) {
+	tm, ok := s.terminals(w)
+	if !ok {
+		return
+	}
+	var req struct {
+		Cwd  string `json:"cwd"`
+		Cols uint16 `json:"cols"`
+		Rows uint16 `json:"rows"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Cwd) == "" {
+		req.Cwd = s.cfg.Workspace
+	}
+	sess, err := tm.create(req.Cwd, req.Cols, req.Rows)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": sess.ID, "cwd": sess.Cwd, "createdAt": sess.CreatedAt})
+}
+
+func (s *server) handleTerminalList(w http.ResponseWriter, r *http.Request) {
+	tm, ok := s.terminals(w)
+	if !ok {
+		return
+	}
+	type dto struct {
+		ID        string    `json:"id"`
+		Cwd       string    `json:"cwd"`
+		Shell     string    `json:"shell"`
+		CreatedAt time.Time `json:"createdAt"`
+	}
+	out := []dto{}
+	for _, t := range tm.list() {
+		out = append(out, dto{ID: t.ID, Cwd: t.Cwd, Shell: t.Shell, CreatedAt: t.CreatedAt})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"terminals": out})
+}
+
+// handleTerminalStream is the SSE side of a terminal attachment: `attached`,
+// then the scrollback `snapshot`, then live `output` (both base64), and
+// finally `exit` with the shell's exit code.
+func (s *server) handleTerminalStream(w http.ResponseWriter, r *http.Request) {
+	tm, ok := s.terminals(w)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	dc, err := tm.attach(id)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err)
+		return
+	}
+	defer dc.Close()
+	fl, canFlush := w.(http.Flusher)
+	if !canFlush {
+		httpError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	writeSSE(w, "attached", fmt.Appendf(nil, `{"id":%q}`, id))
+	fl.Flush()
+
+	type frame struct {
+		t       dtach.MsgType
+		payload []byte
+	}
+	frames := make(chan frame, 16)
+	go func() {
+		defer close(frames)
+		for {
+			t, p, err := dc.Recv()
+			if err != nil {
+				return
+			}
+			frames <- frame{t, p}
+			if t == dtach.MsgExit {
+				return
+			}
+		}
+	}()
+
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			fl.Flush()
+		case f, ok := <-frames:
+			if !ok {
+				// Socket died without a clean exit (e.g. the child was
+				// SIGKILLed); report it as an exit so the UI settles.
+				writeSSE(w, "exit", []byte(`{"code":-1}`))
+				fl.Flush()
+				return
+			}
+			switch f.t {
+			case dtach.MsgSnapshot, dtach.MsgOutput:
+				event := "output"
+				if f.t == dtach.MsgSnapshot {
+					event = "snapshot"
+				}
+				data, err := json.Marshal(base64.StdEncoding.EncodeToString(f.payload))
+				if err == nil {
+					writeSSE(w, event, data)
+					fl.Flush()
+				}
+			case dtach.MsgExit:
+				code, _ := dtach.DecodeExit(f.payload)
+				writeSSE(w, "exit", fmt.Appendf(nil, `{"code":%d}`, code))
+				fl.Flush()
+				tm.forget(id)
+				return
+			}
+		}
+	}
+}
+
+func (s *server) handleTerminalInput(w http.ResponseWriter, r *http.Request) {
+	tm, ok := s.terminals(w)
+	if !ok {
+		return
+	}
+	var req struct {
+		Data string `json:"data"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := tm.input(r.PathValue("id"), []byte(req.Data)); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *server) handleTerminalResize(w http.ResponseWriter, r *http.Request) {
+	tm, ok := s.terminals(w)
+	if !ok {
+		return
+	}
+	var req struct {
+		Cols uint16 `json:"cols"`
+		Rows uint16 `json:"rows"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Cols == 0 || req.Rows == 0 {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("cols and rows must be positive"))
+		return
+	}
+	if err := tm.resize(r.PathValue("id"), req.Cols, req.Rows); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *server) handleTerminalKill(w http.ResponseWriter, r *http.Request) {
+	tm, ok := s.terminals(w)
+	if !ok {
+		return
+	}
+	tm.kill(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -535,6 +846,26 @@ func (s *server) handleSetThinking(w http.ResponseWriter, r *http.Request) {
 		sess.broadcast(event)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"level": req.Level})
+}
+
+// handleCommands lists the slash commands the session's pi accepts (extension
+// commands, prompt templates, skills) via pi's get_commands, for the
+// composer's `/` autocomplete.
+func (s *server) handleCommands(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+	defer cancel()
+	var data json.RawMessage
+	if err := sess.rpc.call(ctx, map[string]any{"type": "get_commands"}, &data); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 // handleForkMessages lists the user messages available to fork from, via pi's

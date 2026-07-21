@@ -15,6 +15,7 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: "⌘K / Ctrl+K", does: "New session" },
   { keys: "⌘B / Ctrl+B", does: "Toggle session rail" },
   { keys: "⌘E / Ctrl+E", does: "Toggle file explorer" },
+  { keys: "Ctrl+`", does: "Toggle private terminal (the agent cannot see it)" },
   { keys: "⌘, / Ctrl+,", does: "Settings" },
   { keys: "⌘. / Ctrl+.", does: "Stop the current turn" },
   { keys: "?", does: "This help (when composer is empty)" },
@@ -27,6 +28,7 @@ export function matchChord(e: KeyboardEvent): string | null {
     if (e.key === "k") return "new";
     if (e.key === "b") return "rail";
     if (e.key === "e") return "explorer";
+    if (e.key === "`") return "terminal";
     if (e.key === ",") return "settings";
     if (e.key === ".") return "stop";
   }

@@ -57,6 +57,22 @@ export interface GitInfo {
   branch?: string;
   dirtyCount?: number;
   graph?: string;
+  /** workspace-relative path → one-letter status (M, A, D, R, U, ?) */
+  changes?: Record<string, string>;
+}
+
+export interface GitCommit {
+  hash: string;
+  parents: string[];
+  refs: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+export interface GitDiff {
+  patch: string;
+  truncated?: boolean;
 }
 
 export interface DirListing {
@@ -82,6 +98,13 @@ export interface FileView {
   truncated?: boolean;
   binary?: boolean;
   size?: number;
+}
+
+export interface TerminalInfo {
+  id: string;
+  cwd: string;
+  shell?: string;
+  createdAt: string;
 }
 
 export interface UpdateStatus {
@@ -125,6 +148,14 @@ export interface ForkMessage {
   text: string;
 }
 
+export interface CommandInfo {
+  name: string;
+  description?: string;
+  source: "extension" | "prompt" | "skill";
+  location?: "user" | "project" | "path";
+  path?: string;
+}
+
 export const api = {
   version: () => request<{ service: string; version: string }>("/version"),
 
@@ -139,6 +170,8 @@ export const api = {
     postJSON<void>(`/api/sessions/${sid(id)}/model`, { provider, modelId }),
   setThinking: (id: string, level: string) =>
     postJSON<void>(`/api/sessions/${sid(id)}/thinking`, { level }),
+  commands: (id: string) =>
+    request<{ commands: CommandInfo[] }>(`/api/sessions/${sid(id)}/commands`),
   forkMessages: (id: string) =>
     request<{ messages: ForkMessage[] }>(`/api/sessions/${sid(id)}/fork-messages`),
   fork: (id: string, entryId: string) =>
@@ -159,8 +192,20 @@ export const api = {
   files: (base?: string | null) =>
     request<{ files: string[]; truncated?: boolean }>(`/api/files${q({ base })}`),
   git: (base?: string | null) => request<GitInfo>(`/api/git${q({ base })}`),
+  gitLog: (base?: string | null) => request<{ commits: GitCommit[] }>(`/api/git/log${q({ base })}`),
+  gitDiff: (base?: string | null, ref?: string | null, path?: string | null) =>
+    request<GitDiff>(`/api/git/diff${q({ base, ref, path })}`),
   file: (path: string, base?: string | null) => request<FileView>(`/api/file${q({ path, base })}`),
   rawUrl: (path: string, base?: string | null) => `/api/raw${q({ path, base })}`,
+
+  terminals: () => request<{ terminals: TerminalInfo[] }>("/api/terminals"),
+  createTerminal: (cwd?: string | null) =>
+    postJSON<{ id: string; cwd?: string }>("/api/terminals", cwd ? { cwd } : {}),
+  terminalInput: (id: string, data: string) =>
+    postJSON<void>(`/api/terminals/${sid(id)}/input`, { data }),
+  terminalResize: (id: string, cols: number, rows: number) =>
+    postJSON<void>(`/api/terminals/${sid(id)}/resize`, { cols, rows }),
+  killTerminal: (id: string) => request<void>(`/api/terminals/${sid(id)}`, { method: "DELETE" }),
 
   update: () => request<UpdateStatus>("/api/update"),
   checkUpdate: () => postJSON<UpdateStatus>("/api/update/check", {}),

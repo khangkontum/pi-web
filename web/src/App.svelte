@@ -1,18 +1,20 @@
 <script lang="ts">
-  // The desk: rail | (banner / header / feed+explorer / state bar / composer),
-  // with the spine living inside the feed. Routing decides the open session;
-  // overlays are app-local state.
+  // The desk: rail | (banner / header / (feed+composer | explorer)), with the
+  // spine living inside the feed and the state bar inside the composer.
+  // Routing decides the open session; overlays are app-local state.
   import Composer from "./components/Composer.svelte";
   import Feed from "./components/Feed.svelte";
   import FilePreview from "./components/FilePreview.svelte";
   import FilesPane from "./components/FilesPane.svelte";
+  import GitOverlay from "./components/GitOverlay.svelte";
   import HelpPopover from "./components/HelpPopover.svelte";
   import NewSessionOverlay from "./components/NewSessionOverlay.svelte";
   import PiBanner from "./components/PiBanner.svelte";
+  import QuoteButton from "./components/QuoteButton.svelte";
   import Rail from "./components/Rail.svelte";
   import SessionHeader from "./components/SessionHeader.svelte";
   import SettingsPanel from "./components/SettingsPanel.svelte";
-  import StateBar from "./components/StateBar.svelte";
+  import TerminalPanel from "./components/TerminalPanel.svelte";
   import Toasts from "./components/Toasts.svelte";
   import { rail } from "./lib/rail.svelte";
   import { router } from "./lib/router.svelte";
@@ -26,6 +28,8 @@
   let settingsOpen = $state(false);
   let helpOpen = $state(false);
   let preview = $state<{ path: string; base: string | null } | null>(null);
+  let gitOpen = $state(false);
+  let termOpen = $state(false);
 
   let composer = $state<ReturnType<typeof Composer> | null>(null);
 
@@ -59,8 +63,15 @@
     preview = { path, base: session.cwd };
   }
 
+  // one toggle for both widths: railOpen drives the desktop slot, drawerOpen
+  // drives the <900px drawer — each layout reads only its own flag
+  function toggleRail(): void {
+    railOpen = !railOpen;
+    drawerOpen = !drawerOpen;
+  }
+
   function anyOverlayOpen(): boolean {
-    return newOpen || settingsOpen || helpOpen || preview !== null;
+    return newOpen || settingsOpen || helpOpen || gitOpen || preview !== null;
   }
 
   function onKeydown(e: KeyboardEvent): void {
@@ -68,10 +79,9 @@
     if (chord) {
       e.preventDefault();
       if (chord === "new") newOpen = true;
-      else if (chord === "rail") {
-        railOpen = !railOpen;
-        drawerOpen = !drawerOpen;
-      } else if (chord === "explorer") explorerOpen = !explorerOpen;
+      else if (chord === "rail") toggleRail();
+      else if (chord === "explorer") explorerOpen = !explorerOpen;
+      else if (chord === "terminal") termOpen = !termOpen;
       else if (chord === "settings") settingsOpen = !settingsOpen;
       else if (chord === "stop") composer?.abortTurn();
       return;
@@ -107,25 +117,32 @@
   <div class="main">
     <PiBanner />
     <SessionHeader
-      onToggleRail={() => (drawerOpen = !drawerOpen)}
+      onToggleRail={toggleRail}
       onToggleExplorer={() => (explorerOpen = !explorerOpen)}
+      onGit={() => (gitOpen = true)}
+      onTerminal={() => (termOpen = !termOpen)}
       onSettings={() => (settingsOpen = true)}
       onHelp={() => (helpOpen = true)}
     />
     <div class="content">
-      <Feed onOpenFile={openFile} />
+      <div class="feed-col">
+        <Feed onOpenFile={openFile} />
+        {#if termOpen}
+          <TerminalPanel onClose={() => (termOpen = false)} />
+        {/if}
+        <div class="dock">
+          <Composer bind:this={composer} />
+        </div>
+      </div>
       {#if explorerOpen && session.cwd}
         <FilesPane root={session.cwd} onOpenFile={openFile} onClose={() => (explorerOpen = false)} />
       {/if}
-    </div>
-    <div class="dock">
-      <StateBar />
-      <Composer bind:this={composer} />
     </div>
   </div>
 </div>
 
 <Toasts />
+<QuoteButton onQuote={(t) => composer?.insertQuote(t)} />
 
 {#if newOpen}
   <NewSessionOverlay onClose={() => (newOpen = false)} />
@@ -138,6 +155,9 @@
 {/if}
 {#if preview}
   <FilePreview path={preview.path} base={preview.base} onClose={() => (preview = null)} />
+{/if}
+{#if gitOpen}
+  <GitOverlay base={session.cwd} onClose={() => (gitOpen = false)} />
 {/if}
 
 <style>
@@ -165,9 +185,17 @@
     min-height: 0;
     display: flex;
   }
-  .content > :global(.feed) {
+  /* the composer docks under the feed, not under feed+explorer, so it stays
+     centered on the conversation when the explorer is open */
+  .feed-col {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .feed-col > :global(.feed) {
+    flex: 1;
+    min-height: 0;
   }
   .dock {
     border-top: 1px solid var(--border);

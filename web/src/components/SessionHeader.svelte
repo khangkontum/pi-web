@@ -19,11 +19,15 @@
   let {
     onToggleRail,
     onToggleExplorer,
+    onGit,
+    onTerminal,
     onSettings,
     onHelp,
   }: {
     onToggleRail: () => void;
     onToggleExplorer: () => void;
+    onGit: () => void;
+    onTerminal: () => void;
     onSettings: () => void;
     onHelp: () => void;
   } = $props();
@@ -141,7 +145,13 @@
         ⌸
       </button>
     {/if}
-    <button type="button" class="icon" title="Keyboard shortcuts (?)" onclick={onHelp}>?</button>
+    {#if session.cwd}
+      <button type="button" class="icon" title="Git changes & history" onclick={onGit}>±</button>
+    {/if}
+    <button type="button" class="icon" title="Private terminal (Ctrl+`) — the agent cannot see it" onclick={onTerminal}>
+      ⌨
+    </button>
+    <button type="button" class="icon help" title="Keyboard shortcuts (?)" onclick={onHelp}>?</button>
     <button type="button" class="icon" title="Settings (⌘,)" onclick={onSettings}>⚙</button>
   </div>
 </header>
@@ -150,11 +160,14 @@
   .header {
     display: flex;
     align-items: center;
-    gap: 0.8rem;
-    padding: 0.5rem 1rem;
+    gap: 0.6rem;
+    padding: 0.45rem 0.9rem;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     min-height: 2.6rem;
+    position: relative;
+    /* stay above the rail drawer (z-index 50) so the same toggle button can close it */
+    z-index: 51;
   }
   .rail-toggle {
     display: none;
@@ -195,14 +208,14 @@
     margin-left: auto;
     display: flex;
     align-items: center;
-    gap: 0.45rem;
+    gap: 0.3rem;
   }
   .icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 1.7rem;
-    height: 1.7rem;
+    width: 1.6rem;
+    height: 1.6rem;
     font-size: var(--text-md);
     color: var(--ink-muted);
     border: 1px solid transparent;
@@ -212,9 +225,24 @@
     color: var(--ink);
     background: var(--surface-2);
   }
+  /* narrow screens: shed what a touch device can't use and compact the rest */
   @media (max-width: 700px) {
     .cwd {
       display: none;
+    }
+    .header {
+      gap: 0.45rem;
+      padding: 0.4rem 0.6rem;
+    }
+    .name {
+      max-width: 9rem;
+    }
+    .help {
+      display: none; /* keyboard-shortcut help without a keyboard */
+    }
+    .tools :global(.trigger) {
+      padding: 0.18rem 0.4rem;
+      gap: 0.3em;
     }
   }
 </style>

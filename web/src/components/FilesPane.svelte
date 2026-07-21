@@ -1,6 +1,9 @@
 <script lang="ts">
   // The file explorer pane, rooted at the session's working directory.
+  // Changed files are tinted from /api/git, refreshed when a turn settles.
   import TreeNode from "./TreeNode.svelte";
+  import { api } from "../lib/api";
+  import { session } from "../lib/session.svelte";
 
   let {
     root,
@@ -11,6 +14,33 @@
     onOpenFile: (path: string) => void;
     onClose: () => void;
   } = $props();
+
+  // absolute file path → status letter; absolute dir path → true
+  let gitFiles = $state<Record<string, string>>({});
+  let gitDirs = $state<Record<string, boolean>>({});
+
+  $effect(() => {
+    if (session.view.streaming) return; // re-runs (and refetches) on settle
+    api
+      .git(root)
+      .then((g) => {
+        const files: Record<string, string> = {};
+        const dirs: Record<string, boolean> = {};
+        for (const [rel, st] of Object.entries(g.changes ?? {})) {
+          files[`${root}/${rel}`] = st;
+          let dir = rel;
+          for (;;) {
+            const cut = dir.lastIndexOf("/");
+            if (cut < 0) break;
+            dir = dir.slice(0, cut);
+            dirs[`${root}/${dir}`] = true;
+          }
+        }
+        gitFiles = files;
+        gitDirs = dirs;
+      })
+      .catch(() => {});
+  });
 </script>
 
 <aside class="pane" aria-label="File explorer">
@@ -20,7 +50,7 @@
   </div>
   <div class="tree">
     {#key root}
-      <TreeNode path={root} depth={0} {onOpenFile} />
+      <TreeNode path={root} depth={0} {onOpenFile} {gitFiles} {gitDirs} />
     {/key}
   </div>
 </aside>

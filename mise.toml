@@ -14,6 +14,13 @@ run = """
 go run ./cmd/pi-web &
 GO_PID=$!
 trap 'kill $GO_PID 2>/dev/null' EXIT INT TERM
+until curl -sf -o /dev/null http://127.0.0.1:9999/version; do
+  if ! kill -0 $GO_PID 2>/dev/null; then
+    echo "pi-web exited before listening on :9999" >&2
+    exit 1
+  fi
+  sleep 0.2
+done
 bun run --cwd web dev
 """
 

@@ -1,7 +1,8 @@
 <script lang="ts">
-  // One tool call, updating in place while it runs. Edit/write calls render
-  // as diffs derived from their arguments; everything else shows ANSI-styled
-  // output, clamped to a tail until expanded.
+  // One tool call, updating in place while it runs. The head line is the
+  // record; bodies (diffs for edit/write, ANSI output for the rest) stay
+  // folded until opened — except errors, which always open. Output is
+  // clamped to a tail until expanded.
   import AnsiText from "./AnsiText.svelte";
   import DiffView from "./DiffView.svelte";
   import { deriveToolDiff } from "../lib/diff";
@@ -19,10 +20,13 @@
   const CLAMP_LINES = 22;
 
   let expanded = $state(false);
+  // per-block override of the default fold; null = closed unless errored
+  let open = $state<boolean | null>(null);
 
   const diff = $derived(deriveToolDiff(tool.name, tool.arguments));
   const summary = $derived(toolSummaryText(tool.arguments));
   const outputLines = $derived(tool.output ? tool.output.split("\n") : []);
+  const collapsed = $derived(open === null ? tool.status !== "error" : !open);
   const clamped = $derived(!expanded && outputLines.length > CLAMP_LINES + 4);
   const shownOutput = $derived(
     clamped ? outputLines.slice(-CLAMP_LINES).join("\n") : tool.output,
@@ -47,12 +51,28 @@
     {#if diff}
       <span class="stats"><span class="adds">+{diff.adds}</span> <span class="dels">−{diff.dels}</span></span>
     {/if}
+    {#if diff || tool.output}
+      <button
+        type="button"
+        class="fold"
+        title={collapsed ? (diff ? "Show diff" : "Show output") : diff ? "Hide diff" : "Hide output"}
+        onclick={() => (open = collapsed)}
+      >
+        {#if !collapsed}
+          ▾
+        {:else if diff}
+          ▸
+        {:else}
+          ▸ {outputLines.length} {outputLines.length === 1 ? "line" : "lines"}
+        {/if}
+      </button>
+    {/if}
   </div>
-  {#if diff}
+  {#if diff && !collapsed}
     <div class="body">
       <DiffView {diff} />
     </div>
-  {:else if tool.output}
+  {:else if !diff && tool.output && !collapsed}
     <div class="body">
       {#if clamped}
         <button type="button" class="more" onclick={() => (expanded = true)}>
@@ -144,6 +164,14 @@
   }
   .dels {
     color: var(--err);
+  }
+  .fold {
+    flex: none;
+    font-size: var(--text-xs);
+    color: var(--ink-faint);
+  }
+  .fold:hover {
+    color: var(--live-ink);
   }
   .body {
     margin-top: 0.35rem;
