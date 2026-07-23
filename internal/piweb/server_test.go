@@ -525,6 +525,58 @@ func TestUpdateStatusAndAuto(t *testing.T) {
 	applyResp.Body.Close()
 }
 
+func TestSettingsThinkingCollapse(t *testing.T) {
+	ts, cfg := newTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initial struct {
+		CollapseThinking bool `json:"collapseThinking"`
+	}
+	decodeBody(t, resp, &initial)
+	if !initial.CollapseThinking {
+		t.Fatal("thinking should default collapsed")
+	}
+
+	setResp := postJSON(t, ts.URL+"/api/settings", map[string]any{"collapseThinking": false})
+	if setResp.StatusCode != http.StatusOK {
+		t.Fatalf("set settings: status %d", setResp.StatusCode)
+	}
+	var after struct {
+		CollapseThinking bool `json:"collapseThinking"`
+	}
+	decodeBody(t, setResp, &after)
+	if after.CollapseThinking {
+		t.Fatal("thinking collapse setting not reflected after disabling")
+	}
+	if prefs, ok := loadSettings(cfg.SettingsPath); !ok || prefs.CollapseThinking {
+		t.Fatalf("thinking collapse preference not persisted: %+v ok=%v", prefs, ok)
+	}
+
+	// Other settings writers must preserve this preference.
+	autoResp := postJSON(t, ts.URL+"/api/update/auto", map[string]any{"enabled": true})
+	if autoResp.StatusCode != http.StatusOK {
+		t.Fatalf("set auto-update: status %d", autoResp.StatusCode)
+	}
+	autoResp.Body.Close()
+	if prefs, ok := loadSettings(cfg.SettingsPath); !ok || prefs.CollapseThinking {
+		t.Fatalf("auto-update overwrote thinking preference: %+v ok=%v", prefs, ok)
+	}
+}
+
+func TestSettingsWithoutThinkingPreferenceDefaultsCollapsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"autoUpdate":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prefs, ok := loadSettings(path)
+	if !ok || !prefs.AutoUpdate || !prefs.CollapseThinking {
+		t.Fatalf("legacy settings did not receive defaults: %+v ok=%v", prefs, ok)
+	}
+}
+
 func TestMessageWithImages(t *testing.T) {
 	ts, _ := newTestServer(t)
 	resp := postJSON(t, ts.URL+"/api/sessions", map[string]any{})

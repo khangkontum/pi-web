@@ -4,6 +4,7 @@
   import Overlay from "./Overlay.svelte";
   import Toggle from "./Toggle.svelte";
   import { api, type PiStatus, type UpdateStatus } from "../lib/api";
+  import { appSettings } from "../lib/app-settings.svelte";
   import { prefs } from "../lib/prefs.svelte";
   import { theme, type ThemeMode } from "../lib/theme.svelte";
   import { toasts } from "../lib/toasts.svelte";
@@ -146,6 +147,15 @@
         onChange={(on) => act("piauto", async () => void (pi = await api.setAutoPi(on)))}
       />
     </div>
+  </section>
+
+  <section>
+    <h3 class="label">conversation</h3>
+    <Toggle
+      label="collapse thinking by default"
+      checked={appSettings.collapseThinking}
+      onChange={(on) => act("thinking", () => appSettings.setCollapseThinking(on))}
+    />
   </section>
 
   <section>

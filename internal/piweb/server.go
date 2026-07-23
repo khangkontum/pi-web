@@ -49,10 +49,22 @@ type server struct {
 	modelsMu    sync.Mutex
 	modelsCache []modelInfo
 	modelsAt    time.Time
+
+	prefsMu          sync.RWMutex
+	collapseThinking bool
 }
 
 func newServer(cfg Config, sv *supervisor, upd *updater, pi *piManager, tm *terminalManager) *server {
-	s := &server{cfg: cfg, sv: sv, upd: upd, pi: pi, tm: tm, mux: http.NewServeMux()}
+	prefs, _ := loadSettings(cfg.SettingsPath)
+	s := &server{
+		cfg:              cfg,
+		sv:               sv,
+		upd:              upd,
+		pi:               pi,
+		tm:               tm,
+		mux:              http.NewServeMux(),
+		collapseThinking: prefs.CollapseThinking,
+	}
 
 	s.mux.Handle("GET /", uiHandler())
 
@@ -88,6 +100,8 @@ func newServer(cfg Config, sv *supervisor, upd *updater, pi *piManager, tm *term
 	s.mux.HandleFunc("POST /api/terminals/{id}/input", s.handleTerminalInput)
 	s.mux.HandleFunc("POST /api/terminals/{id}/resize", s.handleTerminalResize)
 	s.mux.HandleFunc("DELETE /api/terminals/{id}", s.handleTerminalKill)
+	s.mux.HandleFunc("GET /api/settings", s.handleSettings)
+	s.mux.HandleFunc("POST /api/settings", s.handleSetSettings)
 	s.mux.HandleFunc("GET /api/update", s.handleUpdateStatus)
 	s.mux.HandleFunc("POST /api/update/check", s.handleUpdateCheck)
 	s.mux.HandleFunc("POST /api/update/apply", s.handleUpdateApply)
@@ -1095,6 +1109,34 @@ func (s *server) handleUpdateAuto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.upd.status())
+}
+
+func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	s.prefsMu.RLock()
+	collapseThinking := s.collapseThinking
+	s.prefsMu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"collapseThinking": collapseThinking,
+	})
+}
+
+func (s *server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CollapseThinking bool `json:"collapseThinking"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	prefs, _ := loadSettings(s.cfg.SettingsPath)
+	prefs.CollapseThinking = req.CollapseThinking
+	if err := saveSettings(s.cfg.SettingsPath, prefs); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.prefsMu.Lock()
+	s.collapseThinking = req.CollapseThinking
+	s.prefsMu.Unlock()
+	s.handleSettings(w, r)
 }
 
 // handlePiStatus returns the installed-pi version state that drives the UI's

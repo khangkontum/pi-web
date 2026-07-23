@@ -8,33 +8,39 @@ import (
 )
 
 // settings is pi-web's only persisted state: a small user-preference file.
-// It deliberately steps outside the otherwise-stateless design so the
-// auto-update choices survive restarts; nothing session-related is stored
-// here. An empty path disables persistence (the value stays in memory).
+// It deliberately steps outside the otherwise-stateless design so app
+// preferences survive restarts; nothing session-related is stored here. An
+// empty path disables persistence (the value stays in memory).
 type settings struct {
 	// AutoUpdate applies newer pi-web releases automatically.
 	AutoUpdate bool `json:"autoUpdate"`
 	// AutoUpdatePi keeps the installed pi coding agent current automatically.
 	AutoUpdatePi bool `json:"autoUpdatePi"`
+	// CollapseThinking starts reasoning blocks closed until the operator opens them.
+	CollapseThinking bool `json:"collapseThinking"`
 }
 
 var settingsMu sync.Mutex
 
+func defaultSettings() settings {
+	return settings{CollapseThinking: true}
+}
+
 // loadSettings reads the preference file. A missing or unreadable file is a
 // normal "no stored preference" state, reported by ok=false.
 func loadSettings(path string) (settings, bool) {
+	s := defaultSettings()
 	if path == "" {
-		return settings{}, false
+		return s, false
 	}
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return settings{}, false
+		return s, false
 	}
-	var s settings
 	if err := json.Unmarshal(data, &s); err != nil {
-		return settings{}, false
+		return defaultSettings(), false
 	}
 	return s, true
 }

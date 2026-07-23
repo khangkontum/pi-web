@@ -50,8 +50,8 @@ type Config struct {
 	// AutoUpdate seeds whether a newer release is applied automatically. The
 	// persisted preference in SettingsPath overrides it when present.
 	AutoUpdate bool
-	// SettingsPath is where the auto-update preference is persisted; empty
-	// keeps the choice in memory only.
+	// SettingsPath is where app preferences are persisted; empty keeps choices
+	// in memory only.
 	SettingsPath string
 	// TerminalDir holds private-terminal records and sockets (process
 	// metadata for reattaching to detached shells, not session state); empty

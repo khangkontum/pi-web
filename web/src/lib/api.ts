@@ -129,6 +129,10 @@ export interface PiStatus {
   checkedAt?: string;
 }
 
+export interface AppSettings {
+  collapseThinking: boolean;
+}
+
 export interface CreateSessionBody {
   message?: string;
   name?: string;
@@ -206,6 +210,9 @@ export const api = {
   terminalResize: (id: string, cols: number, rows: number) =>
     postJSON<void>(`/api/terminals/${sid(id)}/resize`, { cols, rows }),
   killTerminal: (id: string) => request<void>(`/api/terminals/${sid(id)}`, { method: "DELETE" }),
+
+  settings: () => request<AppSettings>("/api/settings"),
+  setSettings: (settings: AppSettings) => postJSON<AppSettings>("/api/settings", settings),
 
   update: () => request<UpdateStatus>("/api/update"),
   checkUpdate: () => postJSON<UpdateStatus>("/api/update/check", {}),

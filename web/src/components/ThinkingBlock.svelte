@@ -1,14 +1,15 @@
 <script lang="ts">
-  // A reasoning block: quiet, collapsible, open by default while it streams
-  // so the operator can watch the agent think.
+  // A reasoning block: quiet and collapsible. The instance-wide preference
+  // chooses its initial state; after mounting, the operator owns the toggle.
+  import { appSettings } from "../lib/app-settings.svelte";
   import Prose from "./Prose.svelte";
 
   let { thinking, streaming }: { thinking: string; streaming: boolean } = $props();
 
-  // open by default only when the block mounts mid-stream; after that the
-  // operator owns the toggle
+  // Completed history remains closed. Streaming thinking opens only when the
+  // operator has disabled the default-collapse preference.
   // svelte-ignore state_referenced_locally
-  let open = $state(streaming);
+  let open = $state(streaming && !appSettings.collapseThinking);
 </script>
 
 <div class="thinking" class:open>

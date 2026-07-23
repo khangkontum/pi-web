@@ -1,6 +1,6 @@
 // Small client-side preferences (not session state): persisted per-browser in
-// localStorage. Server-side preferences (auto-update toggles) live in the Go
-// settings file, not here.
+// localStorage. Instance-wide preferences live in the Go settings file, not
+// here.
 
 const KEY = "pi-web:prefs";
 

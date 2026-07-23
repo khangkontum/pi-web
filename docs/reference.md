@@ -61,6 +61,8 @@ accounts, cookies, or TLS.
 | `POST /api/terminals/{id}/input` | Write keystrokes to the terminal PTY (`{data}`) |
 | `POST /api/terminals/{id}/resize` | Resize the terminal PTY (`{cols, rows}`) |
 | `DELETE /api/terminals/{id}` | SIGTERM the terminal's process group and drop its record |
+| `GET /api/settings` | App preferences `{collapseThinking}` |
+| `POST /api/settings` | Set app preferences (`{collapseThinking}`, persisted) |
 | `GET /api/update` | pi-web update status `{current, latest, available, autoUpdate, canUpdate, checkedAt}` |
 | `POST /api/update/check` | Force a pi-web update check |
 | `POST /api/update/apply` | Install the latest pi-web release and restart |
@@ -85,11 +87,12 @@ directory is root-owned), and restarts — via exit under systemd, or by
 re-execing itself elsewhere. Dev builds (`go install`, version `dev`) never
 self-update. Any failure leaves the installed binary untouched.
 
-The auto-update preferences (`autoUpdate` for pi-web, `autoUpdatePi` for the pi
-coding agent) are persisted to `settings.json` under the user config directory
-(honouring `XDG_CONFIG_HOME` on Linux) so they survive restarts. Besides these
-preferences, the only other files pi-web writes of its own are private-terminal
-process records (see Private terminals below).
+The app preferences (`autoUpdate` for pi-web, `autoUpdatePi` for the pi coding
+agent, and `collapseThinking` for reasoning-block display) are persisted to
+`settings.json` under the user config directory (honouring `XDG_CONFIG_HOME` on
+Linux) so they survive restarts. Besides these preferences, the only other
+files pi-web writes of its own are private-terminal process records (see
+Private terminals below).
 
 ## pi version management
 
