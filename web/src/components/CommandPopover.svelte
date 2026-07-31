@@ -40,8 +40,13 @@
     api
       .commands(sessionId)
       .then((res) => {
-        cache.set(sessionId, res.commands ?? []);
-        commands = res.commands ?? [];
+        const list = res.commands ?? [];
+        // Cache only a non-empty list: a cold session's first `/` spawns pi,
+        // and a transient empty (slow cold-start, aborted fetch) must not be
+        // cached, or it hides commands for the whole app session. Re-fetch on
+        // the next open instead.
+        if (list.length > 0) cache.set(sessionId, list);
+        commands = list;
         loaded = true;
       })
       .catch((err) => {
