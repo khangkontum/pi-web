@@ -211,7 +211,9 @@
       display: block;
       position: fixed;
       z-index: 50;
-      top: 0;
+      /* start under the header (z 51): it paints over the drawer, and at
+         top: 0 it swallowed the rail head with the "+ new" button */
+      top: var(--header-h);
       bottom: 0;
       left: 0;
       transform: translateX(-100%);

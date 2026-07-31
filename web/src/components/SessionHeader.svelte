@@ -164,7 +164,7 @@
     padding: 0.45rem 0.9rem;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
-    min-height: 2.6rem;
+    min-height: var(--header-h);
     position: relative;
     /* stay above the rail drawer (z-index 50) so the same toggle button can close it */
     z-index: 51;

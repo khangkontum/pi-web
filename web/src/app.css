@@ -30,6 +30,7 @@
   --r-md: 8px;
   --r-lg: 12px;
   --rail-w: 264px;
+  --header-h: 2.6rem; /* the mobile rail drawer offsets by this — keep in sync with .header */
   --spine-w: 26px;
   --measure: 80ch; /* reading column */
   --measure-wide: 90ch; /* composer — sits a step wider than the prose */
